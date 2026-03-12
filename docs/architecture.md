@@ -20,13 +20,15 @@ index.js
   ├── lib/infer.js       Inference via Python subprocess (process I/O)
   ├── lib/bundle.js      Standalone model packaging (file I/O)
   ├── lib/active.js      Active learning / uncertainty sampling (process + network I/O)
+  ├── lib/embed.js       Multi-provider embedding abstraction (network I/O)
+  ├── lib/embed-cache.js SQLite embedding cache (file I/O)
   ├── lib/templates.js   Pre-built task template loading (file I/O)
   ├── lib/report.js      HTML evaluation report generation (file I/O)
   ├── lib/config.js      Config file loading + defaults (file I/O)
   └── lib/log.js         Structured JSONL logging (file I/O)
 ```
 
-`lib/generate.js` imports from `lib/provider.js` for multi-provider support. All other modules export functions consumed by `index.js`, which acts as the composition root.
+`lib/generate.js` imports from `lib/provider.js` for multi-provider support. `lib/embed-cache.js` imports from `lib/embed.js` for cached embedding. `lib/data.js` imports from `lib/embed.js` for semantic deduplication. All modules export functions consumed by `index.js`, which acts as the composition root.
 
 ## Data flow
 
@@ -136,6 +138,18 @@ Exports: `bundle(taskName, outputDir)`.
 Active learning via uncertainty sampling. Runs predictions through the trained model, ranks by confidence (ascending), and surfaces the most uncertain examples for labeling. Supports LLM-in-the-loop labeling (send uncertain examples to Claude), iteration history tracking, and integration with the training data pipeline.
 
 Exports: `getUncertainExamples(taskName, texts, { topK })`, `generateAndRankByUncertainty(task, opts)`, `llmLabel(examples, task, { apiKey, model })`, `loadHistory(taskName)`, `saveIteration(taskName, iteration)`.
+
+## lib/embed.js
+
+Multi-provider embedding abstraction supporting OpenAI (`text-embedding-3-small`) and Ollama (`nomic-embed-text`). Each provider has its own fetch implementation matching the provider's embedding API format. Includes `cosineSimilarity()` for vector comparison, used by semantic deduplication. Batch embedding with configurable chunk size and progress callbacks.
+
+Exports: `embed(providerName, texts, opts)`, `cosineSimilarity(a, b)`, `resolveEmbedProvider(task, config)`, `listEmbedProviders()`, `EMBEDDING_PROVIDERS`.
+
+## lib/embed-cache.js
+
+SQLite-backed embedding cache using `bun:sqlite`. Stores embeddings as packed Float32Array buffers keyed by (text_hash, model). Avoids re-embedding the same text when re-training or experimenting. `cachedEmbed()` wraps the embed function — looks up cached vectors first, only calls the API for misses, stores new results.
+
+Exports: `createEmbedCache(cachePath)`, `cachedEmbed(providerName, texts, opts)`, `hashText(text)`, `packEmbedding(arr)`, `unpackEmbedding(buf)`.
 
 ## lib/config.js
 

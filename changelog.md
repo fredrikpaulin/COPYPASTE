@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.1.3
+
+### Sentence embeddings (Phase 7)
+
+- Embedding abstraction (`lib/embed.js`) — unified interface for OpenAI and Ollama embedding APIs
+- `embed()` function with batching, progress callbacks, and per-provider response parsing
+- `resolveEmbedProvider()` and `listEmbedProviders()` for provider configuration
+- `cosineSimilarity()` for vector comparison
+
+### Embedding cache (Phase 7)
+
+- SQLite-backed embedding cache (`lib/embed-cache.js`) via `bun:sqlite` — zero dependencies
+- Keyed by (text_hash, model) for efficient dedup across re-training runs
+- `cachedEmbed()` wrapper that transparently caches embeddings — only embeds texts not already cached
+- Batch get/put operations, per-model count and clear
+- Float32Array binary packing for compact storage
+
+### Semantic deduplication (Phase 7)
+
+- `semanticDeduplicate()` in `lib/data.js` — cosine similarity on embeddings catches paraphrases that trigram matching misses
+- Configurable similarity threshold (default 0.92)
+- "Semantic dedup" option in the TUI task menu
+
+### Embedding-based training (Phase 7)
+
+- Training path that uses pre-computed embeddings as features instead of TF-IDF
+- `load_embeddings()` and `reduce_dimensions()` in `scripts/train.py`
+- Optional PCA or truncated SVD dimensionality reduction with configurable target dimensions
+- `--train-embeddings`, `--val-embeddings`, `--dim-reduce`, `--n-components` CLI flags
+- "Train model (embeddings)" option in the TUI — embeds texts, writes JSONL, trains classifier
+
+### TUI updates
+
+- Task menu expanded to 19 items: added "Semantic dedup", "Train model (embeddings)", "Embedding cache stats"
+- Existing "Train model" renamed to "Train model (TF-IDF)" for clarity
+
+### Tests
+
+- New `test/phase7.test.js` — 24 tests covering cosine similarity (5), provider resolution (3), provider listing (1), mock OpenAI integration (2), mock Ollama integration (1), cache CRUD (7), pack/unpack (1), semantic dedup (2), Python embedding training (2)
+- 186 tests passing across 11 files
+
 ## 0.1.2
 
 ### Multi-provider generation (Phase 6)

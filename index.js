@@ -4,12 +4,14 @@ import {
 } from './lib/tui.js'
 import { loadTask, listTasks, saveTask } from './lib/task.js'
 import { generate, preview } from './lib/generate.js'
-import { loadAndMerge, split, stats, deduplicate, augment, labelImbalance, filterByConfidence } from './lib/data.js'
+import { loadAndMerge, split, stats, deduplicate, augment, labelImbalance, filterByConfidence, semanticDeduplicate } from './lib/data.js'
 import { runTraining, versionModel, listVersions } from './lib/train.js'
 import { predict, loadMeta, listModels } from './lib/infer.js'
 import { bundle } from './lib/bundle.js'
 import { getUncertainExamples, generateAndRankByUncertainty, llmLabel, loadHistory, saveIteration } from './lib/active.js'
 import { listProviders, resolveProvider } from './lib/provider.js'
+import { resolveEmbedProvider, listEmbedProviders } from './lib/embed.js'
+import { cachedEmbed, createEmbedCache } from './lib/embed-cache.js'
 import { listTemplates, loadTemplate } from './lib/templates.js'
 import { generateReport } from './lib/report.js'
 import { loadConfig } from './lib/config.js'
@@ -517,6 +519,140 @@ async function runActiveLearningHistory(task) {
   )
 }
 
+async function runEmbedTrain(task) {
+  header(`Train with embeddings for "${task.name}"`)
+
+  const providers = listEmbedProviders().filter(p => p.configured)
+  if (!providers.length) {
+    warn('No embedding providers configured.')
+    dim('Set OPENAI_API_KEY or ensure Ollama is running.')
+    return
+  }
+
+  const provIdx = await menu('Embedding provider:', providers.map(p => `${p.name} (${p.defaultModel})`))
+  const provider = providers[provIdx]
+
+  // Dimensionality reduction option
+  const reduceIdx = await menu('Dimensionality reduction:', ['None', 'PCA', 'SVD (truncated)'])
+  const dimReduce = reduceIdx === 0 ? null : reduceIdx === 1 ? 'pca' : 'svd'
+  let nComponents = 50
+  if (dimReduce) {
+    const nStr = await prompt('Target dimensions [50]:')
+    nComponents = parseInt(nStr) || 50
+  }
+
+  // Prepare data first
+  const splitResult = await runPrepare(task)
+  if (!splitResult) return
+
+  // Load the split data
+  const { readJsonl, writeJsonl } = await import('./lib/data.js')
+  const trainData = await readJsonl(splitResult.train.path)
+  const valData = await readJsonl(splitResult.val.path)
+
+  // Embed training data
+  const sp = spinner(`Embedding ${trainData.length + valData.length} texts with ${provider.name}...`)
+  try {
+    const allTexts = [...trainData.map(d => d.text), ...valData.map(d => d.text)]
+    const allEmbeddings = await cachedEmbed(provider.key, allTexts, {
+      model: provider.defaultModel,
+      onProgress: (done, total) => sp.stop(`Embedded ${done}/${total}`)
+    })
+
+    const trainEmbeddings = allEmbeddings.slice(0, trainData.length)
+    const valEmbeddings = allEmbeddings.slice(trainData.length)
+
+    sp.stop(`Embedded ${allTexts.length} texts (${trainEmbeddings[0].length} dimensions)`)
+
+    // Write embeddings to JSONL for the Python training script
+    const { join } = await import('node:path')
+    const trainEmbPath = join('data', `${task.name}_train_embeddings.jsonl`)
+    const valEmbPath = join('data', `${task.name}_val_embeddings.jsonl`)
+    await writeJsonl(trainEmbPath, trainEmbeddings.map(e => ({ embedding: e })))
+    await writeJsonl(valEmbPath, valEmbeddings.map(e => ({ embedding: e })))
+
+    info(`Embeddings saved: ${trainEmbPath}, ${valEmbPath}`)
+
+    // Run training with embeddings
+    await runTrain(task, splitResult, {
+      trainEmbeddings: trainEmbPath,
+      valEmbeddings: valEmbPath,
+      dimReduce,
+      nComponents
+    })
+  } catch (e) {
+    sp.fail('Embedding failed')
+    error(e.message)
+  }
+}
+
+async function runSemanticDedup(task) {
+  header(`Semantic deduplication for "${task.name}"`)
+
+  const providers = listEmbedProviders().filter(p => p.configured)
+  if (!providers.length) {
+    warn('No embedding providers configured.')
+    return
+  }
+
+  const data = await loadAndMerge(task)
+  if (!data.length) { warn('No data found.'); return }
+
+  const provIdx = await menu('Embedding provider:', providers.map(p => `${p.name} (${p.defaultModel})`))
+  const provider = providers[provIdx]
+
+  const thresholdStr = await prompt('Similarity threshold (0.0-1.0) [0.92]:')
+  const threshold = parseFloat(thresholdStr) || 0.92
+
+  const sp = spinner(`Embedding ${data.length} texts...`)
+  try {
+    const texts = data.map(d => d.text)
+    const embeddings = await cachedEmbed(provider.key, texts, {
+      model: provider.defaultModel,
+      onProgress: (done, total) => sp.stop(`Embedded ${done}/${total}`)
+    })
+
+    sp.stop(`Embedded ${data.length} texts, finding semantic duplicates...`)
+
+    const result = await semanticDeduplicate(data, embeddings, { threshold })
+    success(`Removed ${result.removed} semantic duplicates (${data.length} → ${result.data.length})`)
+  } catch (e) {
+    sp.fail('Semantic dedup failed')
+    error(e.message)
+  }
+}
+
+async function runEmbedCacheStats() {
+  header('Embedding cache stats')
+
+  try {
+    const { join } = await import('node:path')
+    const cachePath = join('data', 'embed_cache.sqlite')
+    const file = Bun.file(cachePath)
+    if (!await file.exists()) {
+      warn('No embedding cache found yet.')
+      return
+    }
+
+    const cache = createEmbedCache(cachePath)
+    const providers = listEmbedProviders()
+    const rows = []
+    for (const p of providers) {
+      const count = cache.count(p.defaultModel)
+      if (count > 0) rows.push([p.name, p.defaultModel, count])
+    }
+    cache.close()
+
+    if (rows.length) {
+      table(rows, ['Provider', 'Model', 'Cached'])
+    } else {
+      info('Cache is empty.')
+    }
+  } catch (e) {
+    error(e.message)
+  }
+}
+
 async function taskMenu(task) {
   while (true) {
     const action = await menu(`Task: ${task.name}`, [
@@ -524,9 +660,11 @@ async function taskMenu(task) {
       'Preview (sample generation)',
       'Generate synthetic data',
       'Prepare data (dedupe + merge + split)',
+      'Semantic dedup (embedding-based)',
       'Augment data',
       'Confidence filter',
-      'Train model',
+      'Train model (TF-IDF)',
+      'Train model (embeddings)',
       'Compare algorithms',
       'Hyperparameter search',
       'Predict (interactive)',
@@ -535,6 +673,7 @@ async function taskMenu(task) {
       'Evaluation report',
       'Model versions',
       'Bundle for deployment',
+      'Embedding cache stats',
       '← Back'
     ])
 
@@ -542,20 +681,23 @@ async function taskMenu(task) {
     else if (action === 1) await runPreview(task)
     else if (action === 2) await runGenerate(task)
     else if (action === 3) await runPrepare(task)
-    else if (action === 4) await runAugment(task)
-    else if (action === 5) await runConfidenceFilter(task)
-    else if (action === 6) {
+    else if (action === 4) await runSemanticDedup(task)
+    else if (action === 5) await runAugment(task)
+    else if (action === 6) await runConfidenceFilter(task)
+    else if (action === 7) {
       const splitResult = await runPrepare(task)
       if (splitResult) await runTrain(task, splitResult)
     }
-    else if (action === 7) await runCompare(task)
-    else if (action === 8) await runHyperparamSearch(task)
-    else if (action === 9) await runPredict(task)
-    else if (action === 10) await runUncertaintySampling(task)
-    else if (action === 11) await runActiveLearningHistory(task)
-    else if (action === 12) await runReport(task)
-    else if (action === 13) await runModelVersions(task)
-    else if (action === 14) await runBundle(task)
+    else if (action === 8) await runEmbedTrain(task)
+    else if (action === 9) await runCompare(task)
+    else if (action === 10) await runHyperparamSearch(task)
+    else if (action === 11) await runPredict(task)
+    else if (action === 12) await runUncertaintySampling(task)
+    else if (action === 13) await runActiveLearningHistory(task)
+    else if (action === 14) await runReport(task)
+    else if (action === 15) await runModelVersions(task)
+    else if (action === 16) await runBundle(task)
+    else if (action === 17) await runEmbedCacheStats()
     else return
   }
 }
