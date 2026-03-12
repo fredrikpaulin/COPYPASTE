@@ -1,6 +1,6 @@
 # Roadmap
 
-Current status: **v0.1.3 — phases 1–7 complete.** Foundation, production hardening, data quality, model capabilities, deployment, active learning, multi-provider extensibility, and embedding-based models are all implemented. Phases 8–10 target advanced data strategy, transfer learning, and interpretability.
+Current status: **v0.1.6 — phases 1–10 complete.** All planned phases are implemented: foundation, production hardening, data quality, model capabilities, deployment, active learning, multi-provider extensibility, embedding-based models, curriculum learning, transfer learning, and interpretability.
 
 ---
 
@@ -133,7 +133,7 @@ Add optional PCA or UMAP reduction after embedding, configurable via task defini
 
 ---
 
-## Phase 8 — Curriculum and data strategy
+## Phase 8 — Curriculum and data strategy ✅
 
 Control the order and composition of training data for better model quality.
 
@@ -151,7 +151,7 @@ Generate data from multiple providers (e.g. Claude + GPT-4o + Llama3) and combin
 
 ---
 
-## Phase 9 — Multi-task and transfer learning
+## Phase 9 — Multi-task and transfer learning ✅
 
 Train models that share knowledge across tasks.
 
@@ -169,7 +169,7 @@ Chain distillation steps: large model → medium model → small model. First di
 
 ---
 
-## Phase 10 — Evaluation and interpretability
+## Phase 10 — Evaluation and interpretability ✅
 
 Understand why models make the decisions they do.
 

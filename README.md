@@ -52,6 +52,9 @@ lib/
   active.js             Active learning / uncertainty sampling
   embed.js              Multi-provider embedding abstraction (OpenAI, Ollama)
   embed-cache.js        SQLite embedding cache (bun:sqlite)
+  curriculum.js         Curriculum learning, LLM-as-judge, contrastive generation
+  multitask.js          Shared features, zero-shot eval, progressive distillation
+  evaluate.js           K-fold CV, feature importance, error taxonomy, calibration
   templates.js          Pre-built task template loading
   report.js             HTML evaluation report generation
   config.js             Project config (distill.config.json)

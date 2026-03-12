@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.1.6
+
+### Evaluation and interpretability (Phase 10)
+
+- K-fold cross-validation (`kFoldCV`) — split data into k folds, train/evaluate each, report mean ± std accuracy
+- `kFoldSplit()` with Fisher-Yates shuffle and disjoint validation sets
+- Feature importance extraction via inline Python — top TF-IDF coefficients per label, random forest importances
+- Error taxonomy — categorize misclassifications by confusion pair, text length, and data provider
+- Calibration analysis — reliability bins with Expected Calibration Error (ECE)
+- 2D data map projection (`projectTo2D`) — power iteration PCA in pure JS for embedding visualization
+- TUI screens: "K-fold CV", "Feature importance", "Error taxonomy", "Calibration analysis"
+
+### Tests
+
+- New `test/phase10.test.js` — kFoldSplit (5), errorTaxonomy (6), calibrationBins (4), projectTo2D (4), export checks (2)
+- 224 tests passing across 14 files
+
+## 0.1.5
+
+### Multi-task and transfer learning (Phase 9)
+
+- Shared feature training (`sharedFeatureTraining`) — collect texts across tasks for shared TF-IDF vocabulary
+- Zero-shot bootstrap (`zeroShotEval`) — evaluate LLM directly on validation data as accuracy baseline
+- Progressive distillation (`progressiveDistill`) — chain large provider → local Ollama → tag provenance for staged distillation
+- TUI screen: "Zero-shot eval"
+
+### Tests
+
+- New `test/phase9.test.js` — sharedFeatureTraining (2), zeroShotEval structure (2), progressiveDistill export (1)
+
+## 0.1.4
+
+### Curriculum and data strategy (Phase 8)
+
+- Curriculum learning — `scoreDifficulty()` uses model confidence as difficulty proxy, `sortByCurriculum()` orders easy→hard
+- `curriculumStages()` splits data into easy/medium/hard buckets with configurable thresholds
+- LLM-as-judge quality scoring (`llmJudge`) — rates examples on relevance, naturalness, label correctness rubric via callProvider
+- `filterByQuality()` removes examples below a quality threshold
+- Contrastive example generation (`generateContrastive`) — hard negatives near decision boundaries between label pairs
+- Cross-provider ensembling (`ensembleGenerate`) — generate from multiple providers, tag `_provider` provenance
+- TUI screens: "Curriculum analysis", "LLM-as-judge", "Contrastive generation", "Ensemble generate"
+
+### Tests
+
+- New `test/phase8.test.js` — sortByCurriculum (3), curriculumStages (3), filterByQuality (3), generateContrastive validation (2), llmJudge integration (1)
+
 ## 0.1.3
 
 ### Sentence embeddings (Phase 7)
