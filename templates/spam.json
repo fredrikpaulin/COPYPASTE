@@ -1,0 +1,11 @@
+{
+  "name": "spam-detector",
+  "type": "classification",
+  "labels": ["spam", "not-spam"],
+  "description": "Classify whether an email or message is spam",
+  "synthetic": {
+    "count": 200,
+    "prompt": "Generate a realistic email that is {label}. For spam, include typical spam patterns like urgency, fake offers, or phishing. For not-spam, include normal business or personal emails.",
+    "batchSize": 10
+  }
+}

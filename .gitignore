@@ -6,6 +6,12 @@ out
 dist
 *.tgz
 
+# pipeline artifacts
+data/
+models/
+*.pkl
+distill.config.json
+
 # code coverage
 coverage
 *.lcov

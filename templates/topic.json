@@ -1,0 +1,11 @@
+{
+  "name": "topic",
+  "type": "classification",
+  "labels": ["technology", "business", "sports", "entertainment", "science", "politics"],
+  "description": "Classify the topic of a news headline or short text",
+  "synthetic": {
+    "count": 300,
+    "prompt": "Generate a realistic news headline or short paragraph about {label}. Vary the writing style and specificity.",
+    "batchSize": 10
+  }
+}

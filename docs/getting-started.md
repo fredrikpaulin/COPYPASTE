@@ -26,6 +26,23 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 No `bun install` needed — the project has zero JavaScript dependencies.
 
+## Configuration (optional)
+
+Create a `distill.config.json` at the project root to set defaults:
+
+```json
+{
+  "model": "claude-sonnet-4-20250514",
+  "batchSize": 10,
+  "maxRetries": 3,
+  "splitRatio": 0.8,
+  "dataDir": "data",
+  "modelsDir": "models"
+}
+```
+
+All fields are optional — anything you leave out uses the built-in defaults shown above.
+
 ## Running the TUI
 
 ```bash
@@ -79,14 +96,20 @@ See [Task Definition](./task-definition.md) for the full schema reference.
 
 ## Pipeline steps
 
-Once you open a task, the task menu offers four options:
+Once you open a task, the task menu offers these options:
 
-1. **Run full pipeline** — executes steps 2-4 in sequence
-2. **Generate synthetic data** — calls Claude to produce labeled JSONL
-3. **Prepare data** — merges synthetic + real data, shows stats, splits train/val
-4. **Train model** — spawns `scripts/train.py`, outputs a model to `models/<task-name>/`
+1. **Run full pipeline** — executes generate → prepare → train in sequence
+2. **Preview data** — generate a small sample to inspect before a full run
+3. **Generate synthetic data** — calls Claude to produce labeled JSONL
+4. **Prepare data** — merges synthetic + real data, deduplicates, shows stats, checks label balance, splits train/val
+5. **Augment data** — expand the dataset via synonym replacement and random insertion
+6. **Confidence filter** — score examples via Claude and remove low-quality ones
+7. **Train model** — spawns `scripts/train.py`, outputs a model to `models/<task-name>/`
+8. **Predict** — interactive REPL to test the trained model
+9. **Model versions** — list, inspect, or rollback model snapshots
+10. **Bundle for deployment** — package the model as a standalone module
 
-You can run each step independently. For example, generate data once, then re-train multiple times with different parameters.
+You can run each step independently. For example, generate data once, augment and filter, then re-train multiple times.
 
 ## Output
 
@@ -96,4 +119,7 @@ After a successful run, you'll find:
 - `data/<name>_train.jsonl` — training split
 - `data/<name>_val.jsonl` — validation split
 - `models/<name>/model.pkl` — serialized scikit-learn pipeline
-- `models/<name>/meta.json` — accuracy, label list, dataset sizes
+- `models/<name>/meta.json` — accuracy, label list, dataset sizes, timestamp
+- `models/<name>/model.onnx` — ONNX export (if enabled)
+- `models/<name>/versions/` — timestamped model snapshots
+- `logs/<name>_<timestamp>.jsonl` — structured run log

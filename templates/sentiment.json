@@ -1,0 +1,11 @@
+{
+  "name": "sentiment",
+  "type": "classification",
+  "labels": ["positive", "negative", "neutral"],
+  "description": "Classify the sentiment of product reviews or customer feedback",
+  "synthetic": {
+    "count": 200,
+    "prompt": "Generate a realistic product review that is {label}. Vary the product type, writing style, and length.",
+    "batchSize": 10
+  }
+}

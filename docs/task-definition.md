@@ -31,7 +31,9 @@ Controls how Claude generates training examples.
 |---|---|---|---|
 | `count` | integer | `100` | Total examples to generate |
 | `prompt` | string | _(required)_ | Prompt template. Use `{label}` or `{field}` as placeholders |
-| `model` | string | `claude-sonnet-4-20250514` | Anthropic model ID |
+| `provider` | string | `anthropic` | LLM provider: `anthropic`, `openai`, or `ollama` |
+| `model` | string | _(provider default)_ | Model ID (e.g. `claude-sonnet-4-20250514`, `gpt-4o-mini`, `llama3`) |
+| `url` | string | _(provider default)_ | Custom API endpoint URL (for proxies or local deployments) |
 | `batchSize` | integer | `10` | Examples per API call |
 
 The `prompt` field supports two placeholders:

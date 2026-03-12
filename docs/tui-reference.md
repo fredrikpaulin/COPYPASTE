@@ -25,10 +25,15 @@ The entry point. Lists available actions and any existing tasks:
 
   Main Menu
   ❯ Create new task
+    Create from template
     Open task: sentiment
     Open task: spam-detector
     Quit
 ```
+
+### Create from template
+
+Select from five pre-built task templates (sentiment, intent, spam-detector, contact-extractor, topic). The template is cloned to your `tasks/` directory with a new name, ready to customize.
 
 ### Create new task
 
@@ -41,9 +46,20 @@ After opening a task, you see its action menu:
 ```
   Task: sentiment
   ❯ Run full pipeline
+    Preview data
     Generate synthetic data
-    Prepare data (merge + split)
+    Prepare data (dedupe + merge + split)
+    Augment data
+    Confidence filter
     Train model
+    Compare algorithms
+    Hyperparameter search
+    Predict (interactive)
+    Model versions
+    Bundle for deployment
+    Uncertainty sampling
+    Active learning history
+    Evaluation report
     ← Back
 ```
 
@@ -91,6 +107,50 @@ A spinner runs while Python trains the model, replaced by the accuracy readout o
   ✓ Validation Accuracy: 0.9200
   ✓ Model saved to models/sentiment
 ```
+
+### Preview
+
+Shows a small sample of generated examples (default 5) without writing to disk. Useful for prompt iteration:
+
+```
+  ── Preview for "sentiment" (5 examples) ──
+
+  1. "Absolutely love this product" → positive
+  2. "Broke on day two"            → negative
+  3. "Does what it says"           → neutral
+```
+
+### Predict (interactive)
+
+A REPL for testing the trained model. Type text and see the prediction with confidence:
+
+```
+  ── Predict: sentiment ──
+
+  > This laptop is fantastic
+  → positive (0.94)
+
+  > Type text or "quit" to exit
+```
+
+### Model versions
+
+Lists all versioned snapshots with their timestamps and accuracy. Select a version to rollback:
+
+```
+  ── Model versions: sentiment ──
+
+  2026-03-12T10-30-00-000Z  acc: 0.9200
+  2026-03-11T15-45-00-000Z  acc: 0.8800
+```
+
+### Bundle
+
+Packages the trained model as a standalone module and reports the output path and file list.
+
+### Evaluation report
+
+Generates an HTML report at `reports/<task>_report.html` with confusion matrix, per-label precision/recall/F1, label distribution chart, and example errors. Opens automatically if a browser is available.
 
 ## Status indicators
 

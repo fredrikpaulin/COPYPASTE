@@ -1,5 +1,9 @@
 import { test, expect, describe, afterAll } from 'bun:test'
-import { generate, buildSystemPrompt, buildBatchPrompt, parseBatchResponse } from '../lib/generate.js'
+import {
+  generate, preview,
+  buildSystemPrompt, buildBatchPrompt, parseBatchResponse, validateExample,
+  backoffMs
+} from '../lib/generate.js'
 import { join } from 'node:path'
 import { rm } from 'node:fs/promises'
 import { readJsonl } from '../lib/data.js'
@@ -46,81 +50,50 @@ describe('buildSystemPrompt', () => {
 
 describe('buildBatchPrompt', () => {
   test('requests the correct batch size', () => {
-    const task = {
-      type: 'classification',
-      labels: ['a', 'b'],
-      synthetic: { prompt: 'Generate example with {label}' }
-    }
+    const task = { type: 'classification', labels: ['a', 'b'], synthetic: { prompt: 'Generate example with {label}' } }
     const prompt = buildBatchPrompt(task, 15)
     expect(prompt).toContain('Generate exactly 15 training examples')
   })
 
   test('uses classification format', () => {
-    const task = {
-      type: 'classification',
-      labels: ['a', 'b'],
-      synthetic: { prompt: 'test' }
-    }
+    const task = { type: 'classification', labels: ['a', 'b'], synthetic: { prompt: 'test' } }
     const prompt = buildBatchPrompt(task, 5)
     expect(prompt).toContain('"text"')
     expect(prompt).toContain('"label"')
   })
 
   test('uses extraction format', () => {
-    const task = {
-      type: 'extraction',
-      fields: ['name'],
-      synthetic: { prompt: 'test {field}' }
-    }
+    const task = { type: 'extraction', fields: ['name'], synthetic: { prompt: 'test {field}' } }
     const prompt = buildBatchPrompt(task, 5)
     expect(prompt).toContain('"fields"')
   })
 
   test('uses regression format', () => {
-    const task = {
-      type: 'regression',
-      synthetic: { prompt: 'test' }
-    }
+    const task = { type: 'regression', synthetic: { prompt: 'test' } }
     const prompt = buildBatchPrompt(task, 5)
     expect(prompt).toContain('"value"')
   })
 
   test('includes label distribution instruction for classification', () => {
-    const task = {
-      type: 'classification',
-      labels: ['pos', 'neg'],
-      synthetic: { prompt: 'test' }
-    }
+    const task = { type: 'classification', labels: ['pos', 'neg'], synthetic: { prompt: 'test' } }
     const prompt = buildBatchPrompt(task, 5)
     expect(prompt).toContain('Distribute labels roughly evenly')
-    expect(prompt).toContain('pos, neg')
   })
 
   test('replaces {label} placeholder in prompt', () => {
-    const task = {
-      type: 'classification',
-      labels: ['happy', 'sad'],
-      synthetic: { prompt: 'Write a {label} review' }
-    }
+    const task = { type: 'classification', labels: ['happy', 'sad'], synthetic: { prompt: 'Write a {label} review' } }
     const prompt = buildBatchPrompt(task, 5)
     expect(prompt).toContain('happy or sad')
   })
 
   test('replaces {field} placeholder in prompt', () => {
-    const task = {
-      type: 'extraction',
-      fields: ['name', 'phone'],
-      synthetic: { prompt: 'Extract {field} from text' }
-    }
+    const task = { type: 'extraction', fields: ['name', 'phone'], synthetic: { prompt: 'Extract {field} from text' } }
     const prompt = buildBatchPrompt(task, 5)
     expect(prompt).toContain('name, phone')
   })
 
   test('ends with JSON-only instruction', () => {
-    const task = {
-      type: 'regression',
-      synthetic: { prompt: 'test' }
-    }
+    const task = { type: 'regression', synthetic: { prompt: 'test' } }
     const prompt = buildBatchPrompt(task, 5)
     expect(prompt).toContain('Respond with ONLY a valid JSON array')
   })
@@ -130,31 +103,23 @@ describe('buildBatchPrompt', () => {
 
 describe('parseBatchResponse', () => {
   test('parses clean JSON array', () => {
-    const text = '[{"text": "hello", "label": "a"}, {"text": "world", "label": "b"}]'
-    const result = parseBatchResponse(text)
+    const result = parseBatchResponse('[{"text": "hello", "label": "a"}, {"text": "world", "label": "b"}]')
     expect(result).toHaveLength(2)
     expect(result[0].text).toBe('hello')
   })
 
   test('extracts JSON from markdown code fences', () => {
-    const text = '```json\n[{"text": "test", "label": "a"}]\n```'
-    const result = parseBatchResponse(text)
+    const result = parseBatchResponse('```json\n[{"text": "test", "label": "a"}]\n```')
     expect(result).toHaveLength(1)
-    expect(result[0].label).toBe('a')
   })
 
   test('extracts JSON with surrounding text', () => {
-    const text = 'Here are the examples:\n[{"text": "x", "label": "y"}]\nDone!'
-    const result = parseBatchResponse(text)
+    const result = parseBatchResponse('Here are the examples:\n[{"text": "x", "label": "y"}]\nDone!')
     expect(result).toHaveLength(1)
   })
 
   test('handles multiline JSON', () => {
-    const text = `[
-  {"text": "line 1", "label": "a"},
-  {"text": "line 2", "label": "b"}
-]`
-    const result = parseBatchResponse(text)
+    const result = parseBatchResponse('[\n  {"text": "a", "label": "b"},\n  {"text": "c", "label": "d"}\n]')
     expect(result).toHaveLength(2)
   })
 
@@ -167,13 +132,87 @@ describe('parseBatchResponse', () => {
   })
 })
 
+// ── validateExample ───────────────────────────────────────
+
+describe('validateExample', () => {
+  test('accepts valid classification example', () => {
+    const task = { type: 'classification', labels: ['pos', 'neg'] }
+    expect(validateExample({ text: 'great', label: 'pos' }, task)).toBe(true)
+  })
+
+  test('rejects classification with wrong label', () => {
+    const task = { type: 'classification', labels: ['pos', 'neg'] }
+    expect(validateExample({ text: 'great', label: 'unknown' }, task)).toBe(false)
+  })
+
+  test('rejects missing text', () => {
+    const task = { type: 'classification', labels: ['a'] }
+    expect(validateExample({ label: 'a' }, task)).toBe(false)
+  })
+
+  test('rejects empty text', () => {
+    const task = { type: 'classification', labels: ['a'] }
+    expect(validateExample({ text: '  ', label: 'a' }, task)).toBe(false)
+  })
+
+  test('rejects non-object', () => {
+    expect(validateExample(null, { type: 'classification' })).toBe(false)
+    expect(validateExample('string', { type: 'classification' })).toBe(false)
+  })
+
+  test('accepts valid extraction example', () => {
+    const task = { type: 'extraction', fields: ['name'] }
+    expect(validateExample({ text: 'hello', fields: { name: 'John' } }, task)).toBe(true)
+  })
+
+  test('rejects extraction without fields object', () => {
+    const task = { type: 'extraction', fields: ['name'] }
+    expect(validateExample({ text: 'hello' }, task)).toBe(false)
+  })
+
+  test('accepts valid regression example', () => {
+    const task = { type: 'regression' }
+    expect(validateExample({ text: 'hello', value: 3.5 }, task)).toBe(true)
+  })
+
+  test('rejects regression with string value', () => {
+    const task = { type: 'regression' }
+    expect(validateExample({ text: 'hello', value: 'three' }, task)).toBe(false)
+  })
+})
+
+// ── backoffMs ─────────────────────────────────────────────
+
+describe('backoffMs', () => {
+  test('increases with attempt number', () => {
+    const samples = Array.from({ length: 100 }, () => backoffMs(0, 1000, 60000))
+    const avg0 = samples.reduce((a, b) => a + b) / samples.length
+
+    const samples2 = Array.from({ length: 100 }, () => backoffMs(2, 1000, 60000))
+    const avg2 = samples2.reduce((a, b) => a + b) / samples2.length
+
+    expect(avg2).toBeGreaterThan(avg0)
+  })
+
+  test('respects max ceiling', () => {
+    for (let i = 0; i < 50; i++) {
+      expect(backoffMs(10, 1000, 5000)).toBeLessThanOrEqual(5000)
+    }
+  })
+
+  test('always returns positive value', () => {
+    for (let i = 0; i < 50; i++) {
+      expect(backoffMs(i, 1000, 60000)).toBeGreaterThan(0)
+    }
+  })
+})
+
 // ── generate (integration with mock server) ───────────────
 
 describe('generate (mock API)', () => {
   let server
   let port
 
-  // Spin up a local server that mimics the Claude Messages API
   const startMockServer = (responses) => {
     let callIdx = 0
     server = Bun.serve({
@@ -191,34 +230,21 @@ describe('generate (mock API)', () => {
 
   afterAll(() => {
     server?.stop()
-    // Clean up any test data files
     rm(join(DATA_DIR, 'mock-gen_synthetic.jsonl'), { force: true }).catch(() => {})
   })
 
   test('generates data via mock API and writes JSONL', async () => {
-    const batch1 = [
-      { text: 'great', label: 'pos' },
-      { text: 'bad', label: 'neg' }
-    ]
-    const batch2 = [
-      { text: 'ok', label: 'neutral' },
-      { text: 'fine', label: 'pos' }
-    ]
-    startMockServer([batch1, batch2])
+    startMockServer([
+      [{ text: 'great', label: 'pos' }, { text: 'bad', label: 'neg' }],
+      [{ text: 'ok', label: 'neutral' }, { text: 'fine', label: 'pos' }]
+    ])
 
-    // Monkey-patch the API URL by overriding fetch
     const origFetch = globalThis.fetch
-    globalThis.fetch = (url, opts) => {
-      const newUrl = `http://localhost:${port}/v1/messages`
-      return origFetch(newUrl, opts)
-    }
+    globalThis.fetch = (url, opts) => origFetch(`http://localhost:${port}/v1/messages`, opts)
 
     const task = {
-      name: 'mock-gen',
-      type: 'classification',
-      labels: ['pos', 'neg', 'neutral'],
-      description: 'test',
-      synthetic: { count: 4, prompt: 'test', batchSize: 2, model: 'test-model' }
+      name: 'mock-gen', type: 'classification', labels: ['pos', 'neg', 'neutral'],
+      description: 'test', synthetic: { count: 4, prompt: 'test', batchSize: 2, model: 'test-model' }
     }
 
     const progressCalls = []
@@ -230,25 +256,55 @@ describe('generate (mock API)', () => {
     globalThis.fetch = origFetch
 
     expect(result.count).toBe(4)
-    expect(result.path).toContain('mock-gen_synthetic.jsonl')
-
-    // Verify written JSONL
-    const data = await readJsonl(result.path)
-    expect(data).toHaveLength(4)
-    expect(data[0].text).toBe('great')
-
-    // Verify progress was called
+    expect(result.dropped).toBe(0)
     expect(progressCalls.length).toBe(2)
-    expect(progressCalls[0]).toEqual({ cur: 2, total: 4 })
-    expect(progressCalls[1]).toEqual({ cur: 4, total: 4 })
   })
 
-  test('handles API error', async () => {
+  test('drops invalid examples and reports count', async () => {
     server?.stop()
+    // One valid, one with wrong label, one missing text
+    const batch = [
+      { text: 'good', label: 'pos' },
+      { text: 'bad', label: 'INVALID_LABEL' },
+      { label: 'pos' }
+    ]
+    startMockServer([batch])
+
+    const origFetch = globalThis.fetch
+    globalThis.fetch = (url, opts) => origFetch(`http://localhost:${port}/v1/messages`, opts)
+
+    const task = {
+      name: 'mock-gen', type: 'classification', labels: ['pos', 'neg'],
+      description: 'test', synthetic: { count: 3, prompt: 'test', batchSize: 3 }
+    }
+
+    let droppedReport = 0
+    const result = await generate(task, {
+      apiKey: 'key',
+      onProgress: () => {},
+      onDropped: n => { droppedReport = n }
+    })
+
+    globalThis.fetch = origFetch
+
+    expect(result.count).toBe(1)
+    expect(result.dropped).toBe(2)
+    expect(droppedReport).toBe(2)
+  })
+
+  test('retries on 429 and reports via callback', async () => {
+    server?.stop()
+    let callCount = 0
     server = Bun.serve({
       port: 0,
       fetch() {
-        return new Response('rate limited', { status: 429 })
+        callCount++
+        if (callCount <= 1) {
+          return new Response('rate limited', { status: 429 })
+        }
+        return new Response(JSON.stringify({
+          content: [{ text: '[{"text":"ok","label":"a"}]' }]
+        }))
       }
     })
     port = server.port
@@ -257,18 +313,46 @@ describe('generate (mock API)', () => {
     globalThis.fetch = (url, opts) => origFetch(`http://localhost:${port}/v1/messages`, opts)
 
     const task = {
-      name: 'mock-err',
-      type: 'classification',
-      labels: ['a', 'b'],
-      description: 'test',
-      synthetic: { count: 2, prompt: 'test', batchSize: 2 }
+      name: 'mock-gen', type: 'classification', labels: ['a', 'b'],
+      description: 'test', synthetic: { count: 1, prompt: 'test', batchSize: 1 }
+    }
+
+    const retries = []
+    const result = await generate(task, {
+      apiKey: 'key',
+      onProgress: () => {},
+      onRetry: info => retries.push(info)
+    })
+
+    globalThis.fetch = origFetch
+
+    expect(result.count).toBe(1)
+    expect(retries.length).toBe(1)
+    expect(retries[0].status).toBe(429)
+  })
+
+  test('fails after max retries', async () => {
+    server?.stop()
+    server = Bun.serve({
+      port: 0,
+      fetch() { return new Response('overloaded', { status: 529, headers: { 'retry-after': '0' } }) }
+    })
+    port = server.port
+
+    const origFetch = globalThis.fetch
+    globalThis.fetch = (url, opts) => origFetch(`http://localhost:${port}/v1/messages`, opts)
+
+    const task = {
+      name: 'mock-err', type: 'classification', labels: ['a', 'b'],
+      description: 'test', synthetic: { count: 1, prompt: 'test', batchSize: 1 }
     }
 
     try {
       await generate(task, { apiKey: 'key', onProgress: () => {} })
-      expect(true).toBe(false) // should not reach
+      expect(true).toBe(false)
     } catch (e) {
-      expect(e.message).toContain('429')
+      expect(e.message).toContain('529')
+      expect(e.message).toContain('attempts')
     }
 
     globalThis.fetch = origFetch

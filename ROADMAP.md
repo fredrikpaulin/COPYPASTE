@@ -1,10 +1,10 @@
 # Roadmap
 
-Current status: **v0.1 — foundation complete.** Task definition, synthetic data generation, data pipeline, training, TUI, and test suite are all working. Everything below builds on that base.
+Current status: **v0.1.2 — all phases complete.** Foundation, production hardening, data quality, model capabilities, deployment, active learning, and multi-provider extensibility are all implemented.
 
 ---
 
-## Phase 1 — Production hardening
+## Phase 1 — Production hardening ✅
 
 Make the existing pipeline reliable enough for unattended use.
 
@@ -22,7 +22,7 @@ Support a project-level `distill.config.json` for defaults — API key source, d
 
 ---
 
-## Phase 2 — Data quality
+## Phase 2 — Data quality ✅
 
 Improve the quality and diversity of generated training data.
 
@@ -43,7 +43,7 @@ Score generated examples using Claude (or a second model) and filter out low-con
 
 ---
 
-## Phase 3 — Model capabilities
+## Phase 3 — Model capabilities ✅
 
 Expand what kinds of models the pipeline can train.
 
@@ -61,7 +61,7 @@ Add a basic grid search or random search over model hyperparameters, reporting v
 
 ---
 
-## Phase 4 — Deployment
+## Phase 4 — Deployment ✅
 
 Close the loop from training to inference.
 
@@ -79,7 +79,7 @@ Package a trained model + inference code as a standalone module that can be drop
 
 ---
 
-## Phase 5 — Active learning
+## Phase 5 — Active learning ✅
 
 Use model uncertainty to drive smarter data generation.
 
@@ -97,7 +97,7 @@ Track accuracy across training iterations. Show a history of model performance a
 
 ---
 
-## Phase 6 — Multi-provider and extensibility
+## Phase 6 — Multi-provider and extensibility ✅
 
 Remove the hard dependency on a single LLM provider.
 

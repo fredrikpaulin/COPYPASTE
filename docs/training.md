@@ -80,15 +80,63 @@ Set `task.training.script` to point at your own script:
 
 Your script will receive the same `--train`, `--val`, `--output`, `--task-type`, and `--labels` flags, plus any extra args you define. Write to stdout for status updates and the TUI will display them.
 
+## ONNX export
+
+Pass the `--onnx` flag to export the trained model to ONNX format alongside the pickle file. The output is written to `models/<name>/model.onnx`. This requires `skl2onnx`:
+
+```bash
+pip install skl2onnx
+```
+
+ONNX models can be loaded in JavaScript via ONNX Runtime, closing the loop from generation to deployment without leaving the JS ecosystem. The TUI's train step offers an option to enable ONNX export.
+
+## Inference
+
+The inference module (`lib/infer.js`) loads a trained model via the Python subprocess and exposes a `predict(taskName, texts)` function. It writes JSONL to Python's stdin and reads JSON predictions from stdout.
+
+The TUI includes an interactive **Predict** screen: type text, press Enter, and see the model's prediction with confidence scores. This is useful for quick spot-checking after training.
+
+You can also use the standalone `predict.py` that comes with bundled deployments — see the Deployment section below.
+
+## Model versioning
+
+Every time you re-train a task, the previous model is automatically snapshotted to `models/<name>/versions/<timestamp>/`. From the **Model versions** screen in the TUI you can:
+
+- List all versions with their timestamps and accuracy
+- Rollback to a previous version (copies the version's artifacts back to the main model directory)
+
+Versioning functions are in `lib/train.js`: `versionModel(taskName)`, `listVersions(taskName)`, `rollbackModel(taskName, version)`.
+
+## Bundled deployment
+
+The `bundle(taskName, outputDir)` function in `lib/bundle.js` packages a trained model as a standalone, self-contained module. The output directory contains:
+
+- `model.pkl` — the serialized model
+- `model.onnx` — ONNX export (if available)
+- `meta.json` — training metadata (accuracy, labels, sizes)
+- `predict.py` — standalone prediction script with CLI and importable API
+- `package.json` — metadata for the bundle
+- `README.md` — usage instructions
+
+The bundled `predict.py` accepts text as CLI arguments or JSONL on stdin and returns predictions with confidence scores. Drop the bundle directory into any project that has Python available.
+
+Select **Bundle for deployment** from the task menu to create a bundle interactively.
+
 ## Requirements
 
-The only Python dependency is scikit-learn:
+The only Python dependency for basic training is scikit-learn:
 
 ```bash
 pip install scikit-learn
 ```
 
-This pulls in numpy, scipy, joblib, and threadpoolctl as transitive dependencies. No deep learning frameworks are needed for the default pipeline.
+For ONNX export, also install:
+
+```bash
+pip install skl2onnx
+```
+
+These pull in numpy, scipy, joblib, and threadpoolctl as transitive dependencies. No deep learning frameworks are needed for the default pipeline.
 
 ## Extending to deep learning
 

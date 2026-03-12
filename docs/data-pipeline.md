@@ -78,6 +78,33 @@ All data files live in the `data/` directory at the project root:
 
 Real data files can live anywhere — just reference them by path in the task definition.
 
+## Deduplication
+
+The `deduplicate(data, opts)` function removes both exact and near-duplicate examples. Exact duplicates are caught by comparing trimmed text strings. Fuzzy duplicates are detected using trigram-based Jaccard similarity — if two texts share more than 85% of their character trigrams (configurable via `fuzzyThreshold`), the later one is dropped.
+
+This runs automatically during the **Prepare data** step in the TUI. The removed count is displayed so you can see how much repetition Claude produced.
+
+## Data augmentation
+
+The `augment(data, opts)` function expands your dataset by creating modified copies of existing examples. Two augmentation strategies are applied:
+
+- **Synonym replacement** — words that appear in a built-in synonym map (15 common words with 5 synonyms each) are randomly swapped. Probability controlled by `synonymProb` (default 0.3).
+- **Random insertion** — filler words (actually, really, quite, etc.) are inserted at random positions. Probability controlled by `insertProb` (default 0.15).
+
+The `multiplier` option (default 2) controls how many copies to attempt per original example. Only copies that actually differ from the original are kept. Augmented rows get an `_augmented: true` flag.
+
+Select **Augment data** from the task menu to run this interactively.
+
+## Label balance detection
+
+The `labelImbalance(data, labels)` function checks whether any label is under-represented by more than 20% relative to a perfectly even distribution. If imbalances are found, the TUI warns you with the specific labels and their deficits. This runs automatically during data preparation.
+
+## Confidence filtering
+
+The `filterByConfidence(data, task, opts)` function sends examples to Claude in batches and asks it to score each one on a 0–1 quality scale. Examples below the threshold (default 0.7) are removed. This is useful for pruning ambiguous or unrealistic synthetic examples before training.
+
+Select **Confidence filter** from the task menu to run this. It requires an API key and makes additional Claude calls, so it adds to your API costs.
+
 ## Utility exports
 
-The module also exports `readJsonl(path)` and `writeJsonl(path, rows)` for use in scripts or extensions.
+The module also exports `readJsonl(path)` and `writeJsonl(path, rows)` for use in scripts or extensions, plus `trigrams(str)`, `trigramSimilarity(a, b)`, `labelCounts(data)`, `synonymReplace(text)`, and `randomInsert(text)` for lower-level access.

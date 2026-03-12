@@ -1,0 +1,11 @@
+{
+  "name": "contact-extractor",
+  "type": "extraction",
+  "fields": ["name", "email", "phone"],
+  "description": "Extract contact information (name, email, phone) from text",
+  "synthetic": {
+    "count": 200,
+    "prompt": "Generate realistic text that contains some or all of these contact details: {field}. Vary the context — emails, messages, business cards, meeting notes.",
+    "batchSize": 10
+  }
+}

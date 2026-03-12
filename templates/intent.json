@@ -1,0 +1,11 @@
+{
+  "name": "intent",
+  "type": "classification",
+  "labels": ["greeting", "farewell", "question", "command", "complaint", "other"],
+  "description": "Classify user message intent in a chatbot or support system",
+  "synthetic": {
+    "count": 300,
+    "prompt": "Generate a realistic user message to a chatbot with intent {label}. Vary formality, urgency, and topic.",
+    "batchSize": 10
+  }
+}
