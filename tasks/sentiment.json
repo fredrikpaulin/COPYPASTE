@@ -1,0 +1,14 @@
+{
+  "name": "sentiment",
+  "type": "classification",
+  "labels": ["positive", "negative", "neutral"],
+  "description": "Classify customer review sentiment",
+  "synthetic": {
+    "count": 50,
+    "prompt": "Generate a realistic customer product review with sentiment {label}",
+    "batchSize": 10
+  },
+  "training": {
+    "splitRatio": 0.8
+  }
+}

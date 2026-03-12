@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DistillationTask",
+  "type": "object",
+  "required": ["name", "type", "description"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+$",
+      "description": "Unique task identifier (lowercase, hyphens, underscores)"
+    },
+    "type": {
+      "type": "string",
+      "enum": ["classification", "extraction", "regression", "sequence-labeling"],
+      "description": "What kind of model we're training"
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of the task"
+    },
+    "labels": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 2,
+      "description": "Class labels (required for classification/sequence-labeling)"
+    },
+    "fields": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Fields to extract (required for extraction)"
+    },
+    "synthetic": {
+      "type": "object",
+      "properties": {
+        "count": { "type": "integer", "minimum": 1, "default": 100 },
+        "prompt": { "type": "string", "description": "Template for generating examples. Use {label} or {field} placeholders." },
+        "model": { "type": "string", "default": "claude-sonnet-4-20250514" },
+        "batchSize": { "type": "integer", "minimum": 1, "default": 10 }
+      },
+      "required": ["count", "prompt"]
+    },
+    "realData": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to real data file (JSONL)" },
+        "inputField": { "type": "string", "default": "text" },
+        "labelField": { "type": "string", "default": "label" }
+      },
+      "required": ["path"]
+    },
+    "training": {
+      "type": "object",
+      "properties": {
+        "script": { "type": "string", "default": "scripts/train.py" },
+        "splitRatio": { "type": "number", "minimum": 0.1, "maximum": 0.9, "default": 0.8 },
+        "args": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean"] },
+          "description": "Extra args passed to the training script"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "classification" } } },
+      "then": { "required": ["labels"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "extraction" } } },
+      "then": { "required": ["fields"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "sequence-labeling" } } },
+      "then": { "required": ["labels"] }
+    }
+  ]
+}

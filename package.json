@@ -1,0 +1,6 @@
+{
+  "name": "copypaste",
+  "module": "index.js",
+  "type": "module",
+  "private": true
+}
