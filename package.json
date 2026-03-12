@@ -1,6 +1,40 @@
 {
   "name": "copypaste",
+  "version": "0.1.0",
+  "description": "Train small, task-specific models from LLM-generated data. Define a task, generate synthetic examples via Claude, and train a scikit-learn model — all from an interactive TUI.",
   "module": "index.js",
   "type": "module",
-  "private": true
+  "private": false,
+  "license": "MIT",
+  "author": {
+    "name": "Fredrik Paulin",
+    "email": "fredrik@rymdskepp.com",
+    "url": "https://fredrikpaulin.hashnode.dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fredrikpaulin/copypaste"
+  },
+  "homepage": "https://github.com/fredrikpaulin/copypaste#readme",
+  "bugs": {
+    "url": "https://github.com/fredrikpaulin/copypaste/issues"
+  },
+  "keywords": [
+    "distillation",
+    "machine-learning",
+    "synthetic-data",
+    "claude",
+    "tui",
+    "bun",
+    "scikit-learn",
+    "classification",
+    "training-pipeline"
+  ],
+  "scripts": {
+    "start": "bun index.js",
+    "test": "bun test"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  }
 }
