@@ -20,8 +20,10 @@ import { kFoldCV, featureImportance, errorTaxonomy, calibrationBins, projectTo2D
 import { trainEnsembleModels, listEnsembleModels, ensemblePredict, predictWithThreshold } from './lib/ensemble.js'
 import { recordExperiment, listExperiments, compareExperiments, bestExperiment, experimentStats, hashDataset } from './lib/experiment.js'
 import { checkDeps, detectDevice, listModelPresets, trainTransformer, predictTransformer, hasTransformerModel } from './lib/transformer.js'
+import { trainCRF, predictSequence, predictBatch, evaluateEntities, extractEntities, saveModel as saveCRFModel, loadModel as loadCRFModel, hasCRFModel, labelsToBIO, validateBIO } from './lib/crf.js'
 import { loadConfig } from './lib/config.js'
 import { startLog, logEntry, flushLog } from './lib/log.js'
+import { join } from 'node:path'
 
 const API_KEY = process.env.ANTHROPIC_API_KEY
 
@@ -1289,6 +1291,180 @@ async function runTransformerCompare(task) {
   )
 }
 
+// ── CRF Sequence Labeling ────────────────────────────────
+
+async function runCRFTrain(task) {
+  if (task.type !== 'sequence-labeling') {
+    warn('CRF training requires a sequence-labeling task'); return
+  }
+
+  header(`Train CRF for "${task.name}"`)
+  const tags = labelsToBIO(task.labels)
+  info(`Entity types: ${task.labels.join(', ')}`)
+  info(`BIO tags: ${tags.join(', ')}`)
+
+  // Load data
+  const { readJsonl } = await import('./lib/data.js')
+  const dataPath = join('data', `${task.name}_synthetic.jsonl`)
+  const file = Bun.file(dataPath)
+  if (!await file.exists()) { warn('No data found. Generate data first.'); return }
+
+  const data = await readJsonl(dataPath)
+  const seqData = data.filter(d => Array.isArray(d.tokens) && Array.isArray(d.tags))
+  if (seqData.length < 2) { warn(`Only ${seqData.length} valid sequences found. Need at least 2.`); return }
+
+  // Split
+  const splitIdx = Math.floor(seqData.length * 0.8)
+  const trainData = seqData.slice(0, splitIdx)
+  const valData = seqData.slice(splitIdx)
+  info(`Train: ${trainData.length} sequences, Val: ${valData.length} sequences`)
+
+  // Train
+  const epochsStr = await prompt('Epochs [10]:')
+  const epochs = parseInt(epochsStr) || 10
+
+  const startTime = Date.now()
+  const model = trainCRF(trainData, {
+    tags,
+    epochs,
+    onEpoch: ({ epoch, epochs, accuracy, sequencesCorrect, sequencesTotal }) => {
+      progress(epoch, epochs, `epoch — ${sequencesCorrect}/${sequencesTotal} sequences correct (${(accuracy * 100).toFixed(1)}%)`)
+    }
+  })
+
+  const duration = Date.now() - startTime
+  success(`Training complete in ${(duration / 1000).toFixed(1)}s`)
+
+  // Evaluate
+  const predictions = predictBatch(valData.map(d => d.tokens), model)
+  const eval_ = evaluateEntities(valData, predictions)
+
+  info(`Token accuracy: ${(eval_.tokenAccuracy * 100).toFixed(1)}%`)
+  info(`Entity F1 (micro): ${(eval_.micro.f1 * 100).toFixed(1)}%`)
+  info(`Entities — gold: ${eval_.totalEntities.gold}, predicted: ${eval_.totalEntities.predicted}`)
+
+  if (Object.keys(eval_.byType).length > 0) {
+    table(
+      Object.entries(eval_.byType).map(([type, m]) => [
+        type,
+        (m.precision * 100).toFixed(1) + '%',
+        (m.recall * 100).toFixed(1) + '%',
+        (m.f1 * 100).toFixed(1) + '%',
+        m.support
+      ]),
+      ['Entity', 'Precision', 'Recall', 'F1', 'Support']
+    )
+  }
+
+  // Save
+  const modelDir = await saveCRFModel(task.name, model)
+  success(`Model saved to ${modelDir}`)
+
+  // Record experiment
+  try {
+    recordExperiment({
+      task: task.name,
+      algorithm: 'crf',
+      accuracy: eval_.micro.f1,
+      train_size: trainData.length,
+      val_size: valData.length,
+      feature_mode: 'crf',
+      hyperparams: { epochs, hashSize: model.hashSize },
+      duration_ms: duration,
+      labels: task.labels
+    })
+    dim('  Experiment recorded')
+  } catch {}
+}
+
+async function runCRFPredict(task) {
+  if (task.type !== 'sequence-labeling') {
+    warn('CRF prediction requires a sequence-labeling task'); return
+  }
+
+  const model = await loadCRFModel(task.name)
+  if (!model) { warn('No CRF model found. Train one first.'); return }
+
+  header(`CRF Predict — "${task.name}"`)
+  info('Enter text to tag (or "q" to quit):')
+
+  while (true) {
+    const text = await prompt('Text:')
+    if (text === 'q' || text === 'quit') break
+
+    const tokens = text.split(/\s+/)
+    const tags = predictSequence(tokens, model)
+    const entities = extractEntities(tokens, tags)
+
+    // Show tagged output
+    const tagged = tokens.map((t, i) => {
+      if (tags[i] === 'O') return t
+      return `[${t}/${tags[i]}]`
+    }).join(' ')
+    info(tagged)
+
+    if (entities.length > 0) {
+      for (const e of entities) {
+        dim(`  ${e.type}: "${e.text}"`)
+      }
+    } else {
+      dim('  (no entities found)')
+    }
+  }
+}
+
+async function runCRFEval(task) {
+  if (task.type !== 'sequence-labeling') {
+    warn('CRF evaluation requires a sequence-labeling task'); return
+  }
+
+  const model = await loadCRFModel(task.name)
+  if (!model) { warn('No CRF model found. Train one first.'); return }
+
+  header(`CRF Evaluation — "${task.name}"`)
+
+  const { readJsonl } = await import('./lib/data.js')
+  const dataPath = join('data', `${task.name}_synthetic.jsonl`)
+  const file = Bun.file(dataPath)
+  if (!await file.exists()) { warn('No data found.'); return }
+
+  const data = await readJsonl(dataPath)
+  const seqData = data.filter(d => Array.isArray(d.tokens) && Array.isArray(d.tags))
+  const valData = seqData.slice(Math.floor(seqData.length * 0.8))
+
+  if (valData.length === 0) { warn('No validation data.'); return }
+
+  const predictions = predictBatch(valData.map(d => d.tokens), model)
+  const eval_ = evaluateEntities(valData, predictions)
+
+  info(`Sequences: ${valData.length}`)
+  info(`Token accuracy: ${(eval_.tokenAccuracy * 100).toFixed(1)}%`)
+  info(`Entity F1 (micro): P=${(eval_.micro.precision * 100).toFixed(1)}% R=${(eval_.micro.recall * 100).toFixed(1)}% F1=${(eval_.micro.f1 * 100).toFixed(1)}%`)
+
+  if (Object.keys(eval_.byType).length > 0) {
+    table(
+      Object.entries(eval_.byType).map(([type, m]) => [
+        type,
+        (m.precision * 100).toFixed(1) + '%',
+        (m.recall * 100).toFixed(1) + '%',
+        (m.f1 * 100).toFixed(1) + '%',
+        m.support
+      ]),
+      ['Entity', 'Precision', 'Recall', 'F1', 'Support']
+    )
+  }
+
+  // Show sample predictions
+  info('Sample predictions:')
+  for (let i = 0; i < Math.min(3, valData.length); i++) {
+    const gold = valData[i]
+    const pred = predictions[i]
+    dim(`  Gold: ${gold.tokens.map((t, j) => gold.tags[j] !== 'O' ? `[${t}/${gold.tags[j]}]` : t).join(' ')}`)
+    dim(`  Pred: ${pred.tokens.map((t, j) => pred.tags[j] !== 'O' ? `[${t}/${pred.tags[j]}]` : t).join(' ')}`)
+    dim('')
+  }
+}
+
 async function taskMenu(task) {
   while (true) {
     const action = await menu(`Task: ${task.name}`, [
@@ -1328,7 +1504,10 @@ async function taskMenu(task) {
       'Train transformer (fine-tune)',                 // 33
       'Predict (transformer)',                         // 34
       'Compare all models (experiment history)',        // 35
-      '← Back'                                         // 36
+      'Train CRF (sequence labeling)',                  // 36
+      'Predict CRF (tag text)',                         // 37
+      'Evaluate CRF (entity F1)',                       // 38
+      '← Back'                                         // 39
     ])
 
     if (action === 0) await runFullPipeline(task)
@@ -1370,6 +1549,9 @@ async function taskMenu(task) {
     else if (action === 33) await runTransformerTrain(task)
     else if (action === 34) await runTransformerPredict(task)
     else if (action === 35) await runTransformerCompare(task)
+    else if (action === 36) await runCRFTrain(task)
+    else if (action === 37) await runCRFPredict(task)
+    else if (action === 38) await runCRFEval(task)
     else return
   }
 }

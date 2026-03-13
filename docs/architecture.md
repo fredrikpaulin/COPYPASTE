@@ -28,13 +28,14 @@ index.js
   ├── lib/ensemble.js    Ensemble inference + confidence threshold (process I/O)
   ├── lib/experiment.js  Experiment tracking via SQLite (file I/O)
   ├── lib/transformer.js Transformer fine-tuning orchestration (process I/O)
+  ├── lib/crf.js         Pure JS CRF for sequence labeling (pure logic + file I/O)
   ├── lib/templates.js   Pre-built task template loading (file I/O)
   ├── lib/report.js      HTML evaluation report generation (file I/O)
   ├── lib/config.js      Config file loading + defaults (file I/O)
   └── lib/log.js         Structured JSONL logging (file I/O)
 ```
 
-`lib/generate.js` imports from `lib/provider.js` for multi-provider support. `lib/embed-cache.js` imports from `lib/embed.js` for cached embedding. `lib/data.js` imports from `lib/embed.js` for semantic deduplication. `lib/curriculum.js` imports from `lib/infer.js` (difficulty scoring), `lib/provider.js` (LLM-as-judge, contrastive), and `lib/generate.js` (ensemble). `lib/multitask.js` imports from `lib/provider.js` (zero-shot eval) and `lib/generate.js` (progressive distillation). `lib/evaluate.js` is mostly self-contained — k-fold CV shells out to Python, feature importance runs an inline Python script, and the pure-JS functions (error taxonomy, calibration, PCA projection) have no imports. `lib/transformer.js` orchestrates `scripts/train_transformer.py` via subprocess — handles dependency detection, device discovery, model presets, and structured output parsing. All modules export functions consumed by `index.js`, which acts as the composition root.
+`lib/generate.js` imports from `lib/provider.js` for multi-provider support. `lib/embed-cache.js` imports from `lib/embed.js` for cached embedding. `lib/data.js` imports from `lib/embed.js` for semantic deduplication. `lib/curriculum.js` imports from `lib/infer.js` (difficulty scoring), `lib/provider.js` (LLM-as-judge, contrastive), and `lib/generate.js` (ensemble). `lib/multitask.js` imports from `lib/provider.js` (zero-shot eval) and `lib/generate.js` (progressive distillation). `lib/evaluate.js` is mostly self-contained — k-fold CV shells out to Python, feature importance runs an inline Python script, and the pure-JS functions (error taxonomy, calibration, PCA projection) have no imports. `lib/transformer.js` orchestrates `scripts/train_transformer.py` via subprocess — handles dependency detection, device discovery, model presets, and structured output parsing. `lib/crf.js` is entirely self-contained — feature extraction, hashing, Viterbi decoding, training, evaluation, and model persistence all in pure JavaScript with no external dependencies. All modules export functions consumed by `index.js`, which acts as the composition root.
 
 ## Data flow
 
@@ -215,6 +216,16 @@ Exports: `listTemplates()`, `loadTemplate(name)`, `TEMPLATES_DIR`.
 Generates standalone HTML evaluation reports with inline CSS. Includes a confusion matrix (color-coded by cell value), per-label precision/recall/F1/support table, label distribution bar chart, and grouped example errors. Reports are written to `reports/<task-name>_report.html`.
 
 Exports: `generateReport(taskName, { valData, predictions, labels, meta })`, `confusionMatrix(actual, predicted, labels)`, `perLabelMetrics(actual, predicted, labels)`, `findErrors(data, predictions, { maxPerLabel })`.
+
+## lib/crf.js
+
+Pure JavaScript CRF (Conditional Random Field) for sequence labeling tasks like NER, POS tagging, and slot filling. Implements an averaged structured perceptron — for each training sequence, decodes with Viterbi, then updates weights toward gold features and away from predicted features. Weights are averaged across all updates for better generalization.
+
+Feature extraction produces rich token-level features: word identity, word shape (collapsing runs of uppercase/lowercase/digit), prefix/suffix (2 and 3 chars), capitalization, digit presence, hyphen, previous/next word, bigrams, and previous tag. Features are hashed via FNV-1a to a fixed-size index (default 2^18) to avoid a growing dictionary.
+
+`viterbi()` decodes the optimal tag sequence in O(n × T²) where n is sequence length and T is tag count. `extractEntities()` converts BIO tag sequences into entity spans with type, start, end, and text. `evaluateEntities()` computes entity-level precision/recall/F1 per type with micro averaging, plus token-level accuracy. Models are persisted as raw Float64Array binary (weights) plus JSON metadata (tags, hashSize).
+
+Exports: `extractFeatures(tokens, i, prevTag)`, `featureHash(feat, tag, hashSize)`, `fnv1a(str)`, `wordShape(w)`, `viterbi(tokens, tags, weights, hashSize)`, `score(features, tag, weights, hashSize)`, `trainCRF(data, opts)`, `predictSequence(tokens, model)`, `predictBatch(sequences, model)`, `extractEntities(tokens, tags)`, `evaluateEntities(goldData, predictions)`, `saveModel(taskName, model)`, `loadModel(taskName)`, `hasCRFModel(taskName)`, `labelsToBIO(labels)`, `validateBIO(tags)`.
 
 ## scripts/train.py
 

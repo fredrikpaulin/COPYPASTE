@@ -1,0 +1,11 @@
+{
+  "name": "ner",
+  "type": "sequence-labeling",
+  "labels": ["PER", "ORG", "LOC"],
+  "description": "Named entity recognition — identify people, organizations, and locations in text",
+  "synthetic": {
+    "count": 200,
+    "prompt": "Generate realistic sentences containing names of people, companies, and places. Vary sentence structure, domain (news, email, social media), and entity density.",
+    "batchSize": 10
+  }
+}
