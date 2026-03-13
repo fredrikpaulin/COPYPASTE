@@ -55,6 +55,8 @@ lib/
   curriculum.js         Curriculum learning, LLM-as-judge, contrastive generation
   multitask.js          Shared features, zero-shot eval, progressive distillation
   evaluate.js           K-fold CV, feature importance, error taxonomy, calibration
+  ensemble.js           Ensemble inference, weighted majority vote, rejection
+  experiment.js         Experiment tracking via SQLite (data hash, accuracy, hyperparams)
   templates.js          Pre-built task template loading
   report.js             HTML evaluation report generation
   config.js             Project config (distill.config.json)

@@ -25,6 +25,8 @@ index.js
   ├── lib/curriculum.js  Curriculum learning + data strategy (process + network I/O)
   ├── lib/multitask.js   Multi-task / transfer learning (process + network I/O)
   ├── lib/evaluate.js    Evaluation + interpretability (process I/O + pure logic)
+  ├── lib/ensemble.js    Ensemble inference + confidence threshold (process I/O)
+  ├── lib/experiment.js  Experiment tracking via SQLite (file I/O)
   ├── lib/templates.js   Pre-built task template loading (file I/O)
   ├── lib/report.js      HTML evaluation report generation (file I/O)
   ├── lib/config.js      Config file loading + defaults (file I/O)
@@ -171,6 +173,18 @@ Exports: `sharedFeatureTraining(tasks, opts)`, `zeroShotEval(task, valData, opts
 Evaluation and interpretability. `kFoldSplit()` creates k disjoint validation folds with Fisher-Yates shuffle. `kFoldCV()` runs training/evaluation for each fold via the Python subprocess and reports mean ± std accuracy. `featureImportance()` runs an inline Python script to extract top TF-IDF coefficients per label (or random forest importances). `errorTaxonomy()` categorizes misclassifications by confusion pair, text length, and data source. `calibrationBins()` computes reliability bins and Expected Calibration Error (ECE). `projectTo2D()` uses power iteration PCA in pure JS to project embeddings onto two principal components for data map visualization.
 
 Exports: `kFoldSplit(n, k)`, `kFoldCV(task, data, opts)`, `featureImportance(taskName, opts)`, `errorTaxonomy(valData, predictions)`, `calibrationBins(predictions, actual, opts)`, `projectTo2D(embeddings)`.
+
+## lib/ensemble.js
+
+Ensemble inference combining predictions from multiple trained algorithms. `trainEnsembleModels()` trains all three algorithms (logistic regression, SVM, random forest) and stores them in `models/<task>/ensemble/<algorithm>/`. `ensemblePredict()` runs all ensemble models and combines via weighted majority vote — weights are each model's validation accuracy. Returns confidence (weighted vote share), agreement ratio (fraction of models agreeing), and optional rejection when confidence falls below a threshold. `predictWithThreshold()` wraps the primary model's prediction with a rejection mechanism for low-confidence outputs.
+
+Exports: `trainEnsembleModels(task, trainPath, valPath, opts)`, `listEnsembleModels(taskName)`, `ensemblePredict(taskName, texts, opts)`, `predictWithThreshold(taskName, texts, opts)`, `ALGORITHMS`.
+
+## lib/experiment.js
+
+SQLite-backed experiment tracking using `bun:sqlite`. Every training run is automatically recorded with task name, algorithm, accuracy, train/val size, data fingerprint, feature mode, dimensionality reduction settings, hyperparameters (JSON), duration, and labels. `hashDataset()` computes a fast FNV-1a fingerprint over all texts and labels for data versioning. `compareExperiments()` diffs two runs showing accuracy delta, what changed (algorithm, data, features, hyperparams), and whether they used the same dataset. `bestExperiment()` returns the highest-accuracy run for a task. `experimentStats()` returns aggregate metrics across all runs.
+
+Exports: `recordExperiment(entry)`, `listExperiments(taskName, opts)`, `getExperiment(id)`, `compareExperiments(idA, idB)`, `bestExperiment(taskName)`, `clearExperiments(taskName)`, `experimentStats(taskName)`, `hashDataset(rows)`, `openDb()`.
 
 ## lib/config.js
 

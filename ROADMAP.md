@@ -1,6 +1,6 @@
 # Roadmap
 
-Current status: **v0.1.6 — phases 1–10 complete.** All planned phases are implemented: foundation, production hardening, data quality, model capabilities, deployment, active learning, multi-provider extensibility, embedding-based models, curriculum learning, transfer learning, and interpretability.
+Current status: **v0.1.7 — phases 1–11 complete.** All planned phases are implemented: foundation, production hardening, data quality, model capabilities, deployment, active learning, multi-provider extensibility, embedding-based models, curriculum learning, transfer learning, interpretability, ensemble inference, and experiment tracking.
 
 ---
 
@@ -187,3 +187,18 @@ Check whether the model's confidence scores are well-calibrated — when it says
 
 ### Data map visualization
 Plot the training set on a 2D map (UMAP or t-SNE on embeddings) colored by label, with misclassified validation points highlighted. This gives an immediate visual sense of cluster quality, overlap between labels, and where the decision boundary is struggling.
+
+---
+
+## Phase 11 — Ensemble inference and experiment tracking ✅
+
+Combine models and track what works.
+
+### Ensemble inference
+Train all three algorithms (logistic regression, SVM, random forest) side by side, then combine their predictions via weighted majority vote. Weight by validation accuracy so stronger models have more say. Report agreement ratio — how many models agree on the winning label.
+
+### Confidence threshold
+Add a rejection mechanism: predictions below a configurable confidence threshold return `rejected: true` instead of committing to a label. Useful in production where a "don't know" is better than a wrong answer.
+
+### Experiment tracking
+Log every training run in a SQLite database with: task, algorithm, accuracy, data fingerprint, feature mode, hyperparameters, duration. Compare experiments side by side — see what changed between two runs and whether accuracy improved. Query best-ever experiment per task.

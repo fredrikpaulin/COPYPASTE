@@ -17,6 +17,8 @@ import { generateReport } from './lib/report.js'
 import { scoreDifficulty, sortByCurriculum, curriculumStages, llmJudge, filterByQuality, generateContrastive, ensembleGenerate } from './lib/curriculum.js'
 import { zeroShotEval, progressiveDistill } from './lib/multitask.js'
 import { kFoldCV, featureImportance, errorTaxonomy, calibrationBins, projectTo2D } from './lib/evaluate.js'
+import { trainEnsembleModels, listEnsembleModels, ensemblePredict, predictWithThreshold } from './lib/ensemble.js'
+import { recordExperiment, listExperiments, compareExperiments, bestExperiment, experimentStats, hashDataset } from './lib/experiment.js'
 import { loadConfig } from './lib/config.js'
 import { startLog, logEntry, flushLog } from './lib/log.js'
 
@@ -276,7 +278,7 @@ async function runConfidenceFilter(task) {
   success(`Kept ${result.data.length}/${data.length} examples (${result.removed} removed)`)
 }
 
-async function runTrain(task, splitResult, { algorithm, compare = false, search = false, grid } = {}) {
+async function runTrain(task, splitResult, { algorithm, compare = false, search = false, grid, trainEmbeddings, valEmbeddings, dimReduce, nComponents } = {}) {
   header(`Training model for "${task.name}"`)
 
   // Version existing model before overwriting
@@ -290,6 +292,7 @@ async function runTrain(task, splitResult, { algorithm, compare = false, search 
 
   const label = compare ? 'Comparing algorithms...' : search ? 'Searching hyperparameters...' : 'Training in progress...'
   const sp = spinner(label)
+  const startTime = Date.now()
   try {
     const result = await runTraining(task, splitResult.train.path, splitResult.val.path, {
       onnx: !compare && !search,
@@ -297,6 +300,10 @@ async function runTrain(task, splitResult, { algorithm, compare = false, search 
       compare,
       search,
       grid,
+      trainEmbeddings,
+      valEmbeddings,
+      dimReduce,
+      nComponents,
       onStdout: text => {
         for (const line of text.split('\n').filter(Boolean)) {
           if (line.includes('Accuracy')) {
@@ -322,7 +329,32 @@ async function runTrain(task, splitResult, { algorithm, compare = false, search 
       },
       onStderr: text => dim(text.trim())
     })
+    const durationMs = Date.now() - startTime
     success(`Model saved to ${result.modelDir}`)
+
+    // Record experiment automatically
+    if (!compare && !search) {
+      try {
+        const { readJsonl } = await import('./lib/data.js')
+        const trainData = await readJsonl(splitResult.train.path)
+        const valData = await readJsonl(splitResult.val.path)
+        const newMeta = await loadMeta(task.name)
+        recordExperiment({
+          task: task.name,
+          algorithm: algorithm || 'logistic_regression',
+          accuracy: newMeta?.accuracy ?? null,
+          trainSize: trainData.length,
+          valSize: valData.length,
+          dataHash: hashDataset(trainData),
+          featureMode: trainEmbeddings ? 'embeddings' : 'tfidf',
+          dimReduce: dimReduce || null,
+          nComponents: nComponents ?? null,
+          labels: task.labels || null,
+          durationMs
+        })
+        dim('  Experiment recorded.')
+      } catch {}
+    }
   } catch (e) {
     sp.fail('Training failed')
     error(e.message)
@@ -920,6 +952,168 @@ async function runCalibration(task) {
   else warn('Model is poorly calibrated — consider Platt scaling.')
 }
 
+// ── Phase 11: Ensemble & Experiments ──────────────────────
+
+async function runTrainEnsemble(task) {
+  header(`Train ensemble for "${task.name}"`)
+
+  const splitResult = await runPrepare(task)
+  if (!splitResult) return
+
+  const sp = spinner('Training all algorithms...')
+  try {
+    const result = await trainEnsembleModels(task, splitResult.train.path, splitResult.val.path, {
+      onAlgorithm: algo => sp.stop(`Training ${algo}...`),
+      onStdout: () => {},
+      onStderr: () => {}
+    })
+    sp.stop(`Trained ${result.models.length} models`)
+
+    table(
+      result.models.map(m => [m.algorithm, (m.accuracy * 100).toFixed(1) + '%']),
+      ['Algorithm', 'Accuracy']
+    )
+
+    // Record each as an experiment
+    const { readJsonl } = await import('./lib/data.js')
+    const trainData = await readJsonl(splitResult.train.path)
+    const dHash = hashDataset(trainData)
+    for (const m of result.models) {
+      recordExperiment({
+        task: task.name,
+        algorithm: m.algorithm,
+        accuracy: m.accuracy,
+        trainSize: splitResult.train.count,
+        valSize: splitResult.val.count,
+        dataHash: dHash,
+        featureMode: 'tfidf',
+        labels: task.labels || null,
+        notes: 'ensemble training'
+      })
+    }
+    dim('  Experiments recorded.')
+  } catch (e) {
+    sp.fail('Ensemble training failed')
+    error(e.message)
+  }
+}
+
+async function runEnsemblePredict(task) {
+  header(`Ensemble predict for "${task.name}"`)
+
+  const models = await listEnsembleModels(task.name)
+  if (!models.length) {
+    warn('No ensemble models found. Run "Train ensemble" first.')
+    return
+  }
+
+  info(`Ensemble: ${models.map(m => m.algorithm).join(', ')}`)
+
+  const thresholdStr = await prompt('Rejection threshold (0 = accept all) [0]:')
+  const threshold = parseFloat(thresholdStr) || 0
+
+  while (true) {
+    const text = await prompt('Enter text (or "back" to return):')
+    if (text.toLowerCase() === 'back') return
+
+    try {
+      const results = await ensemblePredict(task.name, [text], { threshold })
+      const r = results[0]
+      if (r.rejected) {
+        warn(`Rejected (confidence: ${(r.confidence * 100).toFixed(1)}% < threshold ${(threshold * 100).toFixed(1)}%)`)
+        dim(`  Votes: ${JSON.stringify(r.votes)}`)
+      } else {
+        success(`Label: ${r.label}  (confidence: ${(r.confidence * 100).toFixed(1)}%, agreement: ${(r.agreement * 100).toFixed(0)}%)`)
+        dim(`  Per model: ${r.perModel.map(m => `${m.algorithm}=${m.label}`).join(', ')}`)
+      }
+    } catch (e) {
+      error(e.message)
+    }
+  }
+}
+
+async function runThresholdPredict(task) {
+  header(`Predict with confidence threshold for "${task.name}"`)
+
+  const meta = await loadMeta(task.name)
+  if (!meta) { warn('No trained model found.'); return }
+
+  const thresholdStr = await prompt('Rejection threshold [0.5]:')
+  const threshold = parseFloat(thresholdStr) || 0.5
+  info(`Rejecting predictions below ${(threshold * 100).toFixed(0)}% confidence`)
+
+  while (true) {
+    const text = await prompt('Enter text (or "back" to return):')
+    if (text.toLowerCase() === 'back') return
+
+    try {
+      const results = await predictWithThreshold(task.name, [text], { threshold })
+      const r = results[0]
+      if (r.rejected) {
+        warn(`Rejected: ${r.label} (confidence: ${(r.confidence * 100).toFixed(1)}% — below threshold)`)
+      } else {
+        success(`Label: ${r.label}  (confidence: ${((r.confidence || 0) * 100).toFixed(1)}%)`)
+      }
+    } catch (e) {
+      error(e.message)
+    }
+  }
+}
+
+async function runExperimentHistory(task) {
+  header(`Experiment history for "${task.name}"`)
+
+  const experiments = listExperiments(task.name)
+  if (!experiments.length) {
+    warn('No experiments recorded yet. Train a model to start tracking.')
+    return
+  }
+
+  const stats = experimentStats(task.name)
+  info(`${stats.total} experiments | ${stats.algorithms_tried} algorithms | ${stats.data_versions} data versions`)
+  info(`Best: ${(stats.best_accuracy * 100).toFixed(1)}% | Avg: ${(stats.avg_accuracy * 100).toFixed(1)}% | Worst: ${(stats.worst_accuracy * 100).toFixed(1)}%`)
+
+  table(
+    experiments.slice(0, 20).map(e => [
+      e.id,
+      e.timestamp?.slice(0, 19),
+      e.algorithm || '?',
+      e.accuracy != null ? (e.accuracy * 100).toFixed(1) + '%' : '-',
+      e.train_size || '-',
+      e.feature_mode || 'tfidf',
+      e.data_hash?.slice(0, 8) || '-'
+    ]),
+    ['ID', 'Timestamp', 'Algorithm', 'Accuracy', 'Train', 'Features', 'Data hash']
+  )
+
+  // Offer comparison
+  if (experiments.length >= 2) {
+    const compareChoice = await menu('Compare experiments?', ['Yes', 'No'])
+    if (compareChoice === 0) {
+      const idA = await prompt(`First experiment ID [${experiments[1]?.id}]:`)
+      const idB = await prompt(`Second experiment ID [${experiments[0]?.id}]:`)
+      const a = parseInt(idA) || experiments[1]?.id
+      const b = parseInt(idB) || experiments[0]?.id
+
+      try {
+        const cmp = compareExperiments(a, b)
+        info(`\nComparing #${a} vs #${b}:`)
+        const delta = cmp.diff.accuracyDelta
+        if (delta > 0) success(`Accuracy: +${(delta * 100).toFixed(2)}pp improvement`)
+        else if (delta < 0) warn(`Accuracy: ${(delta * 100).toFixed(2)}pp regression`)
+        else info('Accuracy: unchanged')
+
+        if (cmp.diff.changes.length) {
+          info('Changes:')
+          for (const c of cmp.diff.changes) dim(`  • ${c}`)
+        }
+      } catch (e) {
+        error(e.message)
+      }
+    }
+  }
+}
+
 async function taskMenu(task) {
   while (true) {
     const action = await menu(`Task: ${task.name}`, [
@@ -936,21 +1130,25 @@ async function taskMenu(task) {
       'Curriculum analysis',                         // 10
       'Train model (TF-IDF)',                        // 11
       'Train model (embeddings)',                    // 12
-      'Compare algorithms',                          // 13
-      'Hyperparameter search',                       // 14
-      'K-fold cross-validation',                     // 15
-      'Predict (interactive)',                       // 16
-      'Zero-shot eval (LLM baseline)',               // 17
-      'Uncertainty sampling (active learning)',       // 18
-      'Active learning history',                     // 19
-      'Evaluation report',                           // 20
-      'Feature importance',                          // 21
-      'Error taxonomy',                              // 22
-      'Calibration analysis',                        // 23
-      'Model versions',                              // 24
-      'Bundle for deployment',                       // 25
-      'Embedding cache stats',                       // 26
-      '← Back'                                       // 27
+      'Train ensemble (all algorithms)',             // 13
+      'Compare algorithms',                          // 14
+      'Hyperparameter search',                       // 15
+      'K-fold cross-validation',                     // 16
+      'Predict (interactive)',                       // 17
+      'Predict (confidence threshold)',              // 18
+      'Predict (ensemble)',                          // 19
+      'Zero-shot eval (LLM baseline)',               // 20
+      'Uncertainty sampling (active learning)',       // 21
+      'Active learning history',                     // 22
+      'Evaluation report',                           // 23
+      'Feature importance',                          // 24
+      'Error taxonomy',                              // 25
+      'Calibration analysis',                        // 26
+      'Experiment history',                          // 27
+      'Model versions',                              // 28
+      'Bundle for deployment',                       // 29
+      'Embedding cache stats',                       // 30
+      '← Back'                                       // 31
     ])
 
     if (action === 0) await runFullPipeline(task)
@@ -969,20 +1167,24 @@ async function taskMenu(task) {
       if (splitResult) await runTrain(task, splitResult)
     }
     else if (action === 12) await runEmbedTrain(task)
-    else if (action === 13) await runCompare(task)
-    else if (action === 14) await runHyperparamSearch(task)
-    else if (action === 15) await runKFoldCV(task)
-    else if (action === 16) await runPredict(task)
-    else if (action === 17) await runZeroShot(task)
-    else if (action === 18) await runUncertaintySampling(task)
-    else if (action === 19) await runActiveLearningHistory(task)
-    else if (action === 20) await runReport(task)
-    else if (action === 21) await runFeatureImportance(task)
-    else if (action === 22) await runErrorTaxonomy(task)
-    else if (action === 23) await runCalibration(task)
-    else if (action === 24) await runModelVersions(task)
-    else if (action === 25) await runBundle(task)
-    else if (action === 26) await runEmbedCacheStats()
+    else if (action === 13) await runTrainEnsemble(task)
+    else if (action === 14) await runCompare(task)
+    else if (action === 15) await runHyperparamSearch(task)
+    else if (action === 16) await runKFoldCV(task)
+    else if (action === 17) await runPredict(task)
+    else if (action === 18) await runThresholdPredict(task)
+    else if (action === 19) await runEnsemblePredict(task)
+    else if (action === 20) await runZeroShot(task)
+    else if (action === 21) await runUncertaintySampling(task)
+    else if (action === 22) await runActiveLearningHistory(task)
+    else if (action === 23) await runReport(task)
+    else if (action === 24) await runFeatureImportance(task)
+    else if (action === 25) await runErrorTaxonomy(task)
+    else if (action === 26) await runCalibration(task)
+    else if (action === 27) await runExperimentHistory(task)
+    else if (action === 28) await runModelVersions(task)
+    else if (action === 29) await runBundle(task)
+    else if (action === 30) await runEmbedCacheStats()
     else return
   }
 }

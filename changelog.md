@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.7
+
+### Ensemble inference (Phase 11)
+
+- Train all three algorithms (logistic regression, SVM, random forest) into side-by-side ensemble models
+- `ensemblePredict()` — weighted majority vote across all trained algorithms, weighted by validation accuracy
+- Agreement tracking — what fraction of models agree on the winning label
+- Confidence threshold rejection — predictions below a configurable threshold return `rejected: true` instead of a label
+- `predictWithThreshold()` — single-model prediction with rejection for low-confidence outputs
+- TUI screens: "Train ensemble", "Predict (ensemble)", "Predict (confidence threshold)"
+
+### Experiment tracking (Phase 11)
+
+- SQLite-backed experiment log (`lib/experiment.js`) via `bun:sqlite` — records every training run automatically
+- Each experiment stores: task, algorithm, accuracy, train/val size, data fingerprint (FNV-1a hash), feature mode, dimensionality reduction, hyperparams, duration, labels, notes
+- `hashDataset()` — fast deterministic fingerprint over all texts and labels in a dataset
+- `listExperiments()`, `getExperiment()`, `bestExperiment()`, `experimentStats()` for querying history
+- `compareExperiments()` — side-by-side diff showing accuracy delta, data/algorithm changes
+- Automatic recording on every `runTrain()` and ensemble training call
+- TUI screen: "Experiment history" with comparison workflow
+
+### Tests
+
+- New `test/phase11.test.js` — ensemble exports (5), hashDataset (5), experiment CRUD (10), hyperparams serialization (2)
+- 246 tests passing across 15 files
+
 ## 0.1.6
 
 ### Evaluation and interpretability (Phase 10)
