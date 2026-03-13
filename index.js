@@ -19,6 +19,7 @@ import { zeroShotEval, progressiveDistill } from './lib/multitask.js'
 import { kFoldCV, featureImportance, errorTaxonomy, calibrationBins, projectTo2D } from './lib/evaluate.js'
 import { trainEnsembleModels, listEnsembleModels, ensemblePredict, predictWithThreshold } from './lib/ensemble.js'
 import { recordExperiment, listExperiments, compareExperiments, bestExperiment, experimentStats, hashDataset } from './lib/experiment.js'
+import { checkDeps, detectDevice, listModelPresets, trainTransformer, predictTransformer, hasTransformerModel } from './lib/transformer.js'
 import { loadConfig } from './lib/config.js'
 import { startLog, logEntry, flushLog } from './lib/log.js'
 
@@ -1114,6 +1115,155 @@ async function runExperimentHistory(task) {
   }
 }
 
+// ── Phase 12: Transformer Distillation ───────────────────
+
+async function runTransformerTrain(task) {
+  header(`Transformer fine-tuning for "${task.name}"`)
+
+  // Check dependencies first
+  const deps = await checkDeps()
+  if (!deps.torch || !deps.transformers) {
+    warn('Transformer training requires PyTorch and HuggingFace Transformers.')
+    if (!deps.torch) info('  Install PyTorch: pip3 install torch')
+    if (!deps.transformers) info('  Install Transformers: pip3 install transformers')
+    return
+  }
+
+  // Show device info
+  const device = await detectDevice()
+  info(`Compute device: ${device.device} (${device.info})`)
+
+  // Prepare data
+  const splitResult = await runPrepare(task)
+  if (!splitResult) return
+
+  // Model selection
+  const presets = listModelPresets()
+  const modelIdx = await menu('Choose model:', [
+    ...presets.map(p => `${p.key} (${p.params}) — ${p.description}`),
+    'Custom HuggingFace model'
+  ])
+
+  let model
+  if (modelIdx < presets.length) {
+    model = presets[modelIdx].key
+  } else {
+    model = await prompt('HuggingFace model name (e.g. bert-base-uncased):')
+    if (!model) { warn('No model specified.'); return }
+  }
+
+  // Training config
+  const epochsStr = await prompt('Epochs [default for model]:')
+  const epochs = parseInt(epochsStr) || undefined
+  const bsStr = await prompt('Batch size [16]:')
+  const batchSize = parseInt(bsStr) || 16
+
+  const onnxIdx = await menu('Export to ONNX?', ['No', 'Yes'])
+  const onnx = onnxIdx === 1
+
+  // Version existing model
+  const meta = await loadMeta(task.name)
+  if (meta) {
+    try {
+      const v = await versionModel(task.name)
+      dim(`  Previous model versioned: ${v.version}`)
+    } catch {}
+  }
+
+  const sp = spinner('Fine-tuning transformer...')
+  const startTime = Date.now()
+  try {
+    const result = await trainTransformer(task, splitResult.train.path, splitResult.val.path, {
+      model,
+      epochs,
+      batchSize,
+      onnx,
+      onEpoch: (epoch, total) => sp.stop(`Epoch ${epoch}/${total}...`),
+      onEvalLog: data => {
+        if (data.accuracy) info(`  Epoch ${data.epoch} accuracy: ${(data.accuracy * 100).toFixed(1)}%`)
+      },
+      onStdout: line => {
+        if (line.includes('Validation Accuracy')) sp.stop(line.trim())
+      },
+      onStderr: text => {} // suppress HF warnings
+    })
+    const durationMs = Date.now() - startTime
+    sp.stop(`Training complete`)
+    success(`Accuracy: ${(result.accuracy * 100).toFixed(1)}% | Model: ${result.model} | Device: ${result.device} | Time: ${result.duration}s`)
+    success(`Model saved to ${result.modelDir}`)
+
+    // Record experiment
+    try {
+      const { readJsonl } = await import('./lib/data.js')
+      const trainData = await readJsonl(splitResult.train.path)
+      const valData = await readJsonl(splitResult.val.path)
+      recordExperiment({
+        task: task.name,
+        algorithm: `transformer:${model}`,
+        accuracy: result.accuracy,
+        trainSize: trainData.length,
+        valSize: valData.length,
+        dataHash: hashDataset(trainData),
+        featureMode: 'transformer',
+        hyperparams: { epochs, batchSize, model },
+        labels: task.labels || null,
+        durationMs
+      })
+      dim('  Experiment recorded.')
+    } catch {}
+  } catch (e) {
+    sp.fail('Training failed')
+    error(e.message)
+  }
+}
+
+async function runTransformerPredict(task) {
+  header(`Transformer predict for "${task.name}"`)
+
+  const meta = await loadMeta(task.name)
+  if (!meta || meta.feature_mode !== 'transformer') {
+    warn('No transformer model found. Run "Train transformer" first.')
+    return
+  }
+
+  info(`Model: ${meta.model_name || meta.algorithm} | Accuracy: ${meta.accuracy?.toFixed(4)}`)
+
+  while (true) {
+    const text = await prompt('Enter text (or "back" to return):')
+    if (text.toLowerCase() === 'back') return
+
+    try {
+      const results = await predictTransformer(task.name, [text], { maxLength: meta.max_length })
+      const r = results[0]
+      success(`Label: ${r.label}  (confidence: ${(r.confidence * 100).toFixed(1)}%)`)
+    } catch (e) {
+      error(`Prediction failed: ${e.message}`)
+    }
+  }
+}
+
+async function runTransformerCompare(task) {
+  header(`Compare transformer vs classical models for "${task.name}"`)
+
+  const meta = await loadMeta(task.name)
+  if (!meta) { warn('No trained model found. Train at least one model first.'); return }
+
+  const experiments = listExperiments(task.name, { limit: 20 })
+  if (experiments.length < 1) { warn('No experiments recorded. Train some models first.'); return }
+
+  info('Recent experiments:')
+  table(
+    experiments.slice(0, 10).map(e => [
+      e.id,
+      e.algorithm || '?',
+      e.accuracy != null ? (e.accuracy * 100).toFixed(1) + '%' : '-',
+      e.feature_mode || '?',
+      e.duration_ms ? `${(e.duration_ms / 1000).toFixed(1)}s` : '-'
+    ]),
+    ['ID', 'Algorithm', 'Accuracy', 'Features', 'Duration']
+  )
+}
+
 async function taskMenu(task) {
   while (true) {
     const action = await menu(`Task: ${task.name}`, [
@@ -1148,7 +1298,10 @@ async function taskMenu(task) {
       'Model versions',                              // 28
       'Bundle for deployment',                       // 29
       'Embedding cache stats',                       // 30
-      '← Back'                                       // 31
+      'Train transformer (fine-tune)',                 // 31
+      'Predict (transformer)',                         // 32
+      'Compare all models (experiment history)',        // 33
+      '← Back'                                         // 34
     ])
 
     if (action === 0) await runFullPipeline(task)
@@ -1185,6 +1338,9 @@ async function taskMenu(task) {
     else if (action === 28) await runModelVersions(task)
     else if (action === 29) await runBundle(task)
     else if (action === 30) await runEmbedCacheStats()
+    else if (action === 31) await runTransformerTrain(task)
+    else if (action === 32) await runTransformerPredict(task)
+    else if (action === 33) await runTransformerCompare(task)
     else return
   }
 }

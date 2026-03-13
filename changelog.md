@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.8
+
+### Transformer distillation (Phase 12)
+
+- Fine-tune pretrained transformer models (DistilBERT, TinyBERT, BERT-base, RoBERTa, MiniLM) or any HuggingFace model
+- GPU support — automatic CUDA/MPS detection with CPU fallback
+- Runtime dependency detection — torch and transformers are optional, checked at runtime with clear install instructions
+- `scripts/train_transformer.py` — standalone fine-tuning script following the same CLI contract as `train.py`
+- `lib/transformer.js` — JS orchestration: dependency checks, device detection, model presets, training, prediction
+- HuggingFace Trainer with per-epoch evaluation, structured JSON output for TUI progress (`__EPOCH_START__`, `__TRAIN_LOG__`, `__EVAL_LOG__`, `__TRANSFORMER_RESULTS__`)
+- ONNX export via `optimum` (preferred) or `torch.onnx` fallback
+- Automatic experiment recording with `algorithm: "transformer:<model>"` and `feature_mode: "transformer"`
+- `predictTransformer()` — inference via fine-tuned model with softmax confidence scores
+- TUI screens: "Train transformer (fine-tune)", "Predict (transformer)", "Compare all models"
+- Task menu expanded to 35 items (indices 0-34)
+
+### Tests
+
+- New `test/phase12.test.js` — exports (2), listModelPresets (3), checkDeps (1), detectDevice (1), hasTransformerModel (1), Python utility modes (4), JS/Python preset consistency (2), error handling (2)
+- 262 tests passing across 16 files
+
 ## 0.1.7
 
 ### Ensemble inference (Phase 11)
