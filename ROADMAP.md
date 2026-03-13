@@ -1,6 +1,6 @@
 # Roadmap
 
-Current status: **v0.1.10 — phases 1–14 complete.** All planned phases are implemented: foundation, production hardening, data quality, model capabilities, deployment, active learning, multi-provider extensibility, embedding-based models, curriculum learning, transfer learning, interpretability, ensemble inference, experiment tracking, transformer distillation, streaming generation, and CRF sequence labeling.
+Current status: **v0.1.13 — phases 1–17 complete.** All planned phases are implemented: foundation, production hardening, data quality, model capabilities, deployment, active learning, multi-provider extensibility, embedding-based models, curriculum learning, transfer learning, interpretability, ensemble inference, experiment tracking, transformer distillation, streaming generation, CRF sequence labeling, scoring tasks, task-agnostic active learning loop, and few-shot prompt optimization.
 
 ---
 
@@ -262,3 +262,60 @@ BIO-format prompt templates for LLM-based synthetic data generation. `validateEx
 
 ### Model persistence
 Weights stored as raw Float64Array binary for fast load, metadata as JSON. Same save/load pattern as other model types.
+
+---
+
+## Phase 15 — Scoring tasks ✅
+
+Continuous-valued predictions for ratings, sentiment scores, toxicity, and any task where the output is a number rather than a category.
+
+### Scoring engine
+Pure JavaScript linear regressor with SGD training and L2 regularization. Feature extraction produces rich text features: unigrams, bigrams, character trigrams, text length, punctuation density, capitalization ratio, and boolean indicators (digits, exclamation, question). Features are hashed via FNV-1a with sign trick to a fixed-size weight vector.
+
+### Score range
+Tasks define a `scoreRange` with min/max values. Predictions are clamped to this range. Validation rejects generated examples outside the range. The range is communicated to the LLM in both system and batch prompts for better data generation.
+
+### Evaluation
+Standard regression metrics: MSE (mean squared error), MAE (mean absolute error), RMSE (root mean squared error), Pearson correlation coefficient, and R-squared. Error distribution analysis buckets predictions by absolute error magnitude. Worst predictions are displayed for debugging.
+
+### Data generation
+Scoring-specific prompt templates instruct the LLM to distribute values across the full range with decimal precision. Validation checks numeric type, NaN, and score range boundaries.
+
+---
+
+## Phase 16 — Task-agnostic active learning loop ✅
+
+Use model uncertainty to drive targeted data generation across all task types.
+
+### Uncertainty measures
+Three distinct uncertainty strategies, one per task type. Classification uses complement of softmax confidence (1 - max probability). Sequence labeling uses Viterbi margin — the difference between the best and second-best final path scores in the CRF dynamic programming table. Scoring uses feature dropout variance — predict multiple times with random feature subsets and measure standard deviation.
+
+### Unified interface
+`computeUncertainty()` routes to the correct measure based on `task.type`. `selectMostUncertain()` sorts by uncertainty descending and returns the top-K examples. Both work identically regardless of task type.
+
+### Active learning iteration
+Full loop in a single function: generate a candidate pool via LLM, score uncertainty with the current model, select the most uncertain examples, send them to the LLM for labeling, and append the labeled data to the training file. Callbacks (`onPool`, `onUncertainty`, `onLabeled`) enable TUI progress updates.
+
+### LLM labeling
+Task-type-aware prompt builders format the selected uncertain examples for LLM labeling. Classification prompts include model confidence percentage. Scoring prompts include the model's predicted value. Sequence labeling prompts include BIO tagging instructions. All responses are parsed as JSON arrays.
+
+### Persistence
+Iteration history is saved as JSON in the models directory. Labeled data is appended to the synthetic JSONL file with `_source: 'active_loop'` provenance tags for tracking.
+
+---
+
+## Phase 17 — Few-shot prompt optimization ✅
+
+Select optimal few-shot examples for LLM inference prompts across all task types.
+
+### Selection strategies
+Four strategies for picking few-shot demonstrations. Random provides a baseline. Balanced ensures equal representation per class or score bucket via round-robin. Diverse uses greedy set-cover over extracted features (words, labels, tag types, length buckets) to maximize coverage. Similar selects examples closest to the query text using Jaccard similarity over unigram and bigram sets (weighted 60/40).
+
+### Prompt building
+Task-aware formatting produces clean input/output pairs for each task type. Classification shows text + label, scoring shows text + numeric score, sequence labeling shows tokens + tags arrays, extraction shows text + structured output. `buildFewShotPrompt()` assembles a complete prompt with task header, demonstration examples, and query.
+
+### Optimization
+`optimizeFewShot()` runs multiple strategies (including multiple random trials), evaluates each candidate set against held-out validation examples via LLM inference, and ranks by accuracy. The winning strategy and its examples can be persisted for reuse.
+
+### Persistence
+Few-shot configurations (strategy name, K, selected examples, measured accuracy) are saved as JSON in the models directory and can be loaded for consistent inference.

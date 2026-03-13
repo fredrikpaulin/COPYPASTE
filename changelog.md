@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.1.13
+
+### Few-shot prompt optimization (Phase 17)
+
+- New `lib/few-shot.js` — select optimal few-shot examples for LLM prompts across all task types
+- Four selection strategies: random (baseline), balanced (equal per class/bucket), diverse (greedy feature set-cover), similar (Jaccard n-gram similarity to query)
+- `selectExamples()` unified interface routes to any strategy by name
+- Text similarity via Jaccard over unigram + bigram sets (weighted 60/40)
+- Feature extraction for diversity: word features, label/bucket, tag types, length bucket
+- `formatExample()` and `buildFewShotPrompt()` — task-aware prompt formatting for classification, scoring, sequence-labeling, and extraction
+- `evaluatePromptSet()` — score a few-shot set by running LLM inference on validation examples
+- `optimizeFewShot()` — test multiple strategies, evaluate on held-out set, pick the best
+- `saveFewShotConfig()` / `loadFewShotConfig()` — persist the winning strategy and examples
+- Three new TUI menu items: "Few-shot prompt", "Few-shot optimize", "Few-shot config"
+- Task menu expanded to 48 items (indices 0–47)
+
+### Tests
+
+- New `test/phase17.test.js` — tokenize (3), ngrams (3), jaccard (4), textSimilarity (4), exampleFeatures (5), selectRandom (3), selectBalanced (3), selectDiverse (2), selectSimilar (1), selectExamples (6), formatExample (4), taskHeader (3), buildFewShotPrompt (2), persistence (2), exports (1)
+- 461 tests passing across 21 files
+
+## 0.1.12
+
+### Task-agnostic active learning loop (Phase 16)
+
+- New `lib/active-loop.js` — unified active learning across all task types (classification, sequence-labeling, scoring)
+- Three uncertainty measures: classification confidence (1 - softmax), Viterbi margin (CRF), feature dropout variance (scoring)
+- `computeUncertainty()` routes to the correct measure based on `task.type`
+- `selectMostUncertain()` ranks pool examples by uncertainty and returns top-K
+- `activeLoop()` — full iteration: generate candidate pool → score uncertainty → select most uncertain → LLM labeling
+- `llmLabelForTask()` builds task-type-specific prompts and parses JSON array responses
+- Three prompt builders: `buildClassificationLabelPrompt`, `buildSequenceLabelPrompt`, `buildScoringLabelPrompt`
+- `saveActiveIteration()` / `loadActiveHistory()` — persist iteration history as JSON in models directory
+- `appendLabeledData()` — append active-loop-labeled examples to synthetic JSONL with `_source: 'active_loop'` tag
+- Two new TUI menu items: "Active learning loop (any task type)", "Active loop history"
+- Task menu expanded to 45 items (indices 0–44)
+
+### Tests
+
+- New `test/phase16.test.js` — entropy (5), selectMostUncertain (4), crfMargin (3), sequenceLabelingUncertainty (2), scoringUncertainty (3), computeUncertainty routing (3), label prompt builders (5), persistence (2), appendLabeledData (2), exports (1)
+- 415 tests passing across 20 files
+
+## 0.1.11
+
+### Scoring tasks (Phase 15)
+
+- New `scoring` task type for continuous-valued predictions (ratings, sentiment scores, toxicity, etc.)
+- Pure JavaScript linear regressor with feature hashing — zero dependencies
+- Feature extraction: unigrams, bigrams, character trigrams, length, punctuation density, capitalization ratio, digit/exclamation/question detection
+- FNV-1a feature hashing with sign trick to fixed-size weight vector (default 2^16)
+- SGD training with L2 regularization, learning rate decay, and configurable epochs
+- Evaluation metrics: MSE, MAE, RMSE, Pearson correlation, R-squared
+- Binary model persistence — Float64Array weights as raw buffer, metadata as JSON
+- `generate.js` updated with scoring-specific system prompts (score range), batch prompts (value distribution), and validation (numeric, NaN, range checking)
+- `scoreRange` property in task schema — configurable min/max for score clamping and validation
+- `review-scorer` template: score product reviews 1.0–5.0
+- Three new TUI screens: "Train scoring model", "Predict scoring (score text)", "Evaluate scoring (MSE/correlation)"
+- Error distribution analysis in evaluation (< 0.5, 0.5–1.0, > 1.0 buckets)
+- Worst predictions display for debugging
+- Experiment recording with `algorithm: "scoring"` and `feature_mode: "scoring"`
+- Task menu expanded to 43 items (indices 0–42)
+
+### Tests
+
+- New `test/phase15.test.js` — extractTextFeatures (8), fnv1a (2), hashFeature (2), featureVector (2), scoreText (2), trainScoring (5), predictScore (2), predictScoreBatch (1), evaluateScoring (7), model persistence (4), generate.js integration (10), schema/template (3), exports (1)
+- 386 tests passing across 19 files
+
 ## 0.1.10
 
 ### CRF sequence labeling (Phase 14)

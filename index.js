@@ -21,6 +21,9 @@ import { trainEnsembleModels, listEnsembleModels, ensemblePredict, predictWithTh
 import { recordExperiment, listExperiments, compareExperiments, bestExperiment, experimentStats, hashDataset } from './lib/experiment.js'
 import { checkDeps, detectDevice, listModelPresets, trainTransformer, predictTransformer, hasTransformerModel } from './lib/transformer.js'
 import { trainCRF, predictSequence, predictBatch, evaluateEntities, extractEntities, saveModel as saveCRFModel, loadModel as loadCRFModel, hasCRFModel, labelsToBIO, validateBIO } from './lib/crf.js'
+import { trainScoring, predictScore, predictScoreBatch, evaluateScoring, saveScoringModel, loadScoringModel, hasScoringModel } from './lib/scoring.js'
+import { computeUncertainty, selectMostUncertain, activeLoop, saveActiveIteration, loadActiveHistory, appendLabeledData } from './lib/active-loop.js'
+import { selectExamples, buildFewShotPrompt, optimizeFewShot, saveFewShotConfig, loadFewShotConfig, formatExample } from './lib/few-shot.js'
 import { loadConfig } from './lib/config.js'
 import { startLog, logEntry, flushLog } from './lib/log.js'
 import { join } from 'node:path'
@@ -34,8 +37,8 @@ async function createTask() {
   header('Create New Task')
 
   const name = await prompt('Task name (lowercase, hyphens):')
-  const typeIdx = await menu('Task type:', ['classification', 'extraction', 'regression', 'sequence-labeling'])
-  const type = ['classification', 'extraction', 'regression', 'sequence-labeling'][typeIdx]
+  const typeIdx = await menu('Task type:', ['classification', 'extraction', 'scoring', 'sequence-labeling'])
+  const type = ['classification', 'extraction', 'scoring', 'sequence-labeling'][typeIdx]
   const description = await prompt('Description:')
 
   const task = { name, type, description }
@@ -47,6 +50,11 @@ async function createTask() {
   if (type === 'extraction') {
     const fieldsStr = await prompt('Fields to extract (comma-separated):')
     task.fields = fieldsStr.split(',').map(s => s.trim())
+  }
+  if (type === 'scoring') {
+    const minStr = await prompt('Minimum score [0]:')
+    const maxStr = await prompt('Maximum score [5]:')
+    task.scoreRange = { min: parseFloat(minStr) || 0, max: parseFloat(maxStr) || 5 }
   }
 
   const genPrompt = await prompt('Generation prompt template:')
@@ -1465,6 +1473,460 @@ async function runCRFEval(task) {
   }
 }
 
+// ── Phase 15: Scoring Tasks ──────────────────────────────
+
+async function runScoringTrain(task) {
+  if (task.type !== 'scoring' && task.type !== 'regression') {
+    warn('Scoring training requires a scoring or regression task'); return
+  }
+
+  header(`Train scoring model for "${task.name}"`)
+  const range = task.scoreRange || { min: 0, max: 5 }
+  info(`Score range: ${range.min} to ${range.max}`)
+
+  // Load data
+  const { readJsonl } = await import('./lib/data.js')
+  const dataPath = join('data', `${task.name}_synthetic.jsonl`)
+  const file = Bun.file(dataPath)
+  if (!await file.exists()) { warn('No data found. Generate data first.'); return }
+
+  const data = await readJsonl(dataPath)
+  const scoringData = data.filter(d => typeof d.text === 'string' && typeof d.value === 'number' && !isNaN(d.value))
+  if (scoringData.length < 2) { warn(`Only ${scoringData.length} valid examples found. Need at least 2.`); return }
+
+  // Split
+  const splitIdx = Math.floor(scoringData.length * 0.8)
+  const trainData = scoringData.slice(0, splitIdx)
+  const valData = scoringData.slice(splitIdx)
+  info(`Train: ${trainData.length} examples, Val: ${valData.length} examples`)
+
+  // Training config
+  const epochsStr = await prompt('Epochs [20]:')
+  const epochs = parseInt(epochsStr) || 20
+
+  const startTime = Date.now()
+  const model = trainScoring(trainData, {
+    epochs,
+    minVal: range.min,
+    maxVal: range.max,
+    onEpoch: ({ epoch, epochs: total, mse }) => {
+      progress(epoch, total, `epoch — MSE: ${mse.toFixed(4)}`)
+    }
+  })
+
+  const duration = Date.now() - startTime
+  success(`Training complete in ${(duration / 1000).toFixed(1)}s`)
+
+  // Evaluate
+  const predictions = predictScoreBatch(valData.map(d => d.text), model)
+  const eval_ = evaluateScoring(valData, predictions)
+
+  info(`MSE: ${eval_.mse.toFixed(4)} | MAE: ${eval_.mae.toFixed(4)} | RMSE: ${eval_.rmse.toFixed(4)}`)
+  info(`Correlation: ${eval_.correlation.toFixed(4)} | R\u00b2: ${eval_.r2.toFixed(4)}`)
+
+  // Show sample predictions
+  info('Sample predictions:')
+  const sampleCount = Math.min(5, valData.length)
+  table(
+    valData.slice(0, sampleCount).map((d, i) => [
+      d.text.slice(0, 50) + (d.text.length > 50 ? '...' : ''),
+      d.value.toFixed(2),
+      predictions[i].score.toFixed(2),
+      Math.abs(d.value - predictions[i].score).toFixed(2)
+    ]),
+    ['Text', 'Gold', 'Predicted', 'Error']
+  )
+
+  // Save
+  const modelDir = await saveScoringModel(task.name, model)
+  success(`Model saved to ${modelDir}`)
+
+  // Record experiment
+  try {
+    recordExperiment({
+      task: task.name,
+      algorithm: 'scoring',
+      accuracy: eval_.correlation,
+      train_size: trainData.length,
+      val_size: valData.length,
+      feature_mode: 'scoring',
+      hyperparams: { epochs, hashSize: model.hashSize },
+      duration_ms: duration,
+      notes: `MSE=${eval_.mse.toFixed(4)} MAE=${eval_.mae.toFixed(4)} R2=${eval_.r2.toFixed(4)}`
+    })
+    dim('  Experiment recorded')
+  } catch {}
+}
+
+async function runScoringPredict(task) {
+  if (task.type !== 'scoring' && task.type !== 'regression') {
+    warn('Scoring prediction requires a scoring or regression task'); return
+  }
+
+  const model = await loadScoringModel(task.name)
+  if (!model) { warn('No scoring model found. Train one first.'); return }
+
+  header(`Scoring predict — "${task.name}"`)
+  const range = task.scoreRange || { min: model.minVal, max: model.maxVal }
+  info(`Score range: ${range.min} to ${range.max}`)
+
+  while (true) {
+    const text = await prompt('Enter text (or "back" to return):')
+    if (text.toLowerCase() === 'back') return
+
+    const score = predictScore(text, model)
+    success(`Score: ${score.toFixed(2)}`)
+  }
+}
+
+async function runScoringEval(task) {
+  if (task.type !== 'scoring' && task.type !== 'regression') {
+    warn('Scoring evaluation requires a scoring or regression task'); return
+  }
+
+  const model = await loadScoringModel(task.name)
+  if (!model) { warn('No scoring model found. Train one first.'); return }
+
+  header(`Scoring evaluation — "${task.name}"`)
+
+  const { readJsonl } = await import('./lib/data.js')
+  const dataPath = join('data', `${task.name}_synthetic.jsonl`)
+  const file = Bun.file(dataPath)
+  if (!await file.exists()) { warn('No data found.'); return }
+
+  const data = await readJsonl(dataPath)
+  const scoringData = data.filter(d => typeof d.text === 'string' && typeof d.value === 'number')
+  const valData = scoringData.slice(Math.floor(scoringData.length * 0.8))
+
+  if (valData.length === 0) { warn('No validation data.'); return }
+
+  const predictions = predictScoreBatch(valData.map(d => d.text), model)
+  const eval_ = evaluateScoring(valData, predictions)
+
+  info(`Examples: ${eval_.n}`)
+  table([
+    ['MSE', eval_.mse.toFixed(4)],
+    ['MAE', eval_.mae.toFixed(4)],
+    ['RMSE', eval_.rmse.toFixed(4)],
+    ['Correlation', eval_.correlation.toFixed(4)],
+    ['R\u00b2', eval_.r2.toFixed(4)]
+  ], ['Metric', 'Value'])
+
+  // Error distribution
+  const errors = valData.map((d, i) => Math.abs(d.value - predictions[i].score))
+  const small = errors.filter(e => e < 0.5).length
+  const medium = errors.filter(e => e >= 0.5 && e < 1.0).length
+  const large = errors.filter(e => e >= 1.0).length
+  info('\nError distribution:')
+  table([
+    ['< 0.5', small, `${(small / errors.length * 100).toFixed(0)}%`],
+    ['0.5 - 1.0', medium, `${(medium / errors.length * 100).toFixed(0)}%`],
+    ['> 1.0', large, `${(large / errors.length * 100).toFixed(0)}%`]
+  ], ['Error', 'Count', '%'])
+
+  // Show worst predictions
+  info('\nWorst predictions:')
+  const indexed = valData.map((d, i) => ({ ...d, pred: predictions[i].score, err: Math.abs(d.value - predictions[i].score) }))
+  indexed.sort((a, b) => b.err - a.err)
+  table(
+    indexed.slice(0, 5).map(d => [
+      d.text.slice(0, 40) + (d.text.length > 40 ? '...' : ''),
+      d.value.toFixed(2),
+      d.pred.toFixed(2),
+      d.err.toFixed(2)
+    ]),
+    ['Text', 'Gold', 'Predicted', 'Error']
+  )
+}
+
+// ── Phase 16: Active Learning Loop ───────────────────────
+
+async function runActiveLoop(task) {
+  if (!API_KEY) { error('Set ANTHROPIC_API_KEY in your environment'); return }
+
+  // Check if model exists for this task type
+  if (task.type === 'scoring' || task.type === 'regression') {
+    if (!await hasScoringModel(task.name)) { warn('No scoring model found. Train one first.'); return }
+  } else if (task.type === 'sequence-labeling') {
+    if (!await hasCRFModel(task.name)) { warn('No CRF model found. Train one first.'); return }
+  } else {
+    const meta = await loadMeta(task.name)
+    if (!meta) { warn('No trained model found. Train one first.'); return }
+  }
+
+  header(`Active learning loop — "${task.name}" (${task.type})`)
+
+  const poolStr = await prompt('Pool size (candidates to generate) [30]:')
+  const poolSize = parseInt(poolStr) || 30
+  const selectStr = await prompt('Select top-K most uncertain [10]:')
+  const selectK = parseInt(selectStr) || 10
+
+  let sp = spinner('Generating candidate pool...')
+  try {
+    const result = await activeLoop(task, {
+      apiKey: API_KEY,
+      poolSize,
+      selectK,
+      onPool: count => sp.stop(`Generated ${count} candidates`),
+      onUncertainty: count => { sp.stop(`Scored ${count} examples`); sp = spinner('Selecting most uncertain...') },
+      onLabeled: count => sp.stop(`LLM labeled ${count} examples`)
+    })
+
+    if (!result.selected.length) {
+      warn('No uncertain examples found.')
+      return
+    }
+
+    // Show uncertain examples
+    info(`\nMost uncertain examples (${result.selected.length}):`)
+    if (task.type === 'scoring' || task.type === 'regression') {
+      table(
+        result.selected.map((s, i) => [
+          i + 1,
+          (s.text || '').slice(0, 45) + ((s.text || '').length > 45 ? '...' : ''),
+          s.prediction != null ? s.prediction.toFixed(2) : '?',
+          s.uncertainty.toFixed(4)
+        ]),
+        ['#', 'Text', 'Predicted', 'Uncertainty']
+      )
+    } else if (task.type === 'sequence-labeling') {
+      table(
+        result.selected.map((s, i) => [
+          i + 1,
+          (s.text || '').slice(0, 45) + ((s.text || '').length > 45 ? '...' : ''),
+          s.margin != null ? s.margin.toFixed(2) : '?',
+          s.uncertainty.toFixed(4)
+        ]),
+        ['#', 'Text', 'Margin', 'Uncertainty']
+      )
+    } else {
+      table(
+        result.selected.map((s, i) => [
+          i + 1,
+          (s.text || '').slice(0, 45) + ((s.text || '').length > 45 ? '...' : ''),
+          s.prediction || '?',
+          s.confidence != null ? `${(s.confidence * 100).toFixed(0)}%` : '?',
+          s.uncertainty.toFixed(4)
+        ]),
+        ['#', 'Text', 'Predicted', 'Confidence', 'Uncertainty']
+      )
+    }
+
+    // Show LLM-labeled results
+    if (result.labeled.length) {
+      info(`\nLLM labeled ${result.labeled.length} examples:`)
+      for (const l of result.labeled.slice(0, 5)) {
+        dim(`  ${JSON.stringify(l)}`)
+      }
+      if (result.labeled.length > 5) dim(`  ... and ${result.labeled.length - 5} more`)
+    }
+
+    // Offer to add to training data
+    const addAction = await menu('Add labeled examples to training data?', ['Yes, add to synthetic data', 'No, discard'])
+    if (addAction === 0) {
+      const appendResult = await appendLabeledData(task.name, result.labeled, task.type)
+      success(`Added ${appendResult.added} examples to ${appendResult.path} (${appendResult.total} total)`)
+
+      // Save iteration
+      await saveActiveIteration(task.name, {
+        type: task.type,
+        method: `active_loop_${task.type}`,
+        pool_size: result.poolSize,
+        selected: result.selected.length,
+        labeled: result.labeled.length,
+        added: appendResult.added
+      })
+      dim('  Iteration recorded')
+    }
+  } catch (e) {
+    sp.fail('Active learning loop failed')
+    error(e.message)
+  }
+}
+
+async function runActiveLoopHistory(task) {
+  header(`Active learning loop history — "${task.name}"`)
+
+  const history = await loadActiveHistory(task.name)
+  if (!history.iterations.length) {
+    warn('No active learning loop iterations yet.')
+    return
+  }
+
+  table(
+    history.iterations.map((it, i) => [
+      i + 1,
+      it.timestamp?.slice(0, 19) || 'N/A',
+      it.method || it.type || '?',
+      it.pool_size || '?',
+      it.selected || '?',
+      it.added || 0
+    ]),
+    ['#', 'Timestamp', 'Method', 'Pool', 'Selected', 'Added']
+  )
+}
+
+// ── Few-shot prompt optimization ─────────────────────
+
+async function runFewShotPrompt(task) {
+  header(`Few-shot prompt — "${task.name}" (${task.type})`)
+
+  // Load training data
+  const { readJsonl } = await import('./lib/data.js')
+  const synPath = join(import.meta.dir, 'data', `${task.name}_synthetic.jsonl`)
+  let examples
+  try {
+    examples = await readJsonl(synPath)
+  } catch {
+    error('No training data found. Generate data first.')
+    return
+  }
+
+  if (examples.length < 2) {
+    error('Need at least 2 training examples.')
+    return
+  }
+
+  const strategyIdx = await menu('Selection strategy', [
+    'Random', 'Balanced (equal per class)', 'Diverse (max coverage)', 'Similar (to query)'
+  ])
+  const strategies = ['random', 'balanced', 'diverse', 'similar']
+  const strategy = strategies[strategyIdx]
+
+  const kStr = await prompt(`Number of examples (K) [5]:`)
+  const k = parseInt(kStr) || 5
+
+  let selected
+  if (strategy === 'similar') {
+    const query = await prompt('Query text:')
+    if (!query) { warn('No query provided.'); return }
+    selected = selectExamples(strategy, examples, task, { k, query })
+  } else {
+    selected = selectExamples(strategy, examples, task, { k })
+  }
+
+  info(`Selected ${selected.length} examples via "${strategy}" strategy:`)
+  print('')
+  for (const ex of selected) {
+    print(formatExample(ex, task))
+    print('')
+  }
+
+  const queryStr = await prompt('Test query (enter to skip):')
+  if (queryStr) {
+    const fullPrompt = buildFewShotPrompt(task, selected, queryStr)
+    info('Generated prompt:')
+    print('')
+    print(fullPrompt)
+  }
+}
+
+async function runFewShotOptimize(task) {
+  header(`Few-shot optimization — "${task.name}" (${task.type})`)
+
+  const { readJsonl } = await import('./lib/data.js')
+  const synPath = join(import.meta.dir, 'data', `${task.name}_synthetic.jsonl`)
+  let allData
+  try {
+    allData = await readJsonl(synPath)
+  } catch {
+    error('No training data found. Generate data first.')
+    return
+  }
+
+  if (allData.length < 10) {
+    error('Need at least 10 examples (will split into train/val).')
+    return
+  }
+
+  const kStr = await prompt('Number of few-shot examples (K) [5]:')
+  const k = parseInt(kStr) || 5
+
+  const valStr = await prompt('Validation examples [5]:')
+  const valCount = Math.min(parseInt(valStr) || 5, allData.length - k)
+
+  // Split: use last valCount as validation, rest as training pool
+  const shuffled = [...allData].sort(() => Math.random() - 0.5)
+  const valExamples = shuffled.slice(0, valCount)
+  const trainExamples = shuffled.slice(valCount)
+
+  info(`Training pool: ${trainExamples.length}, validation: ${valExamples.length}`)
+
+  const apiKey = process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY
+  if (!apiKey) {
+    error('No API key found (ANTHROPIC_API_KEY or OPENAI_API_KEY).')
+    return
+  }
+
+  let sp = spinner('Optimizing few-shot examples...')
+  try {
+    const results = await optimizeFewShot(task, trainExamples, valExamples, {
+      k,
+      strategies: ['random', 'balanced', 'diverse'],
+      randomTrials: 3,
+      apiKey,
+      onStrategy: name => { sp.text = `Testing strategy: ${name}` }
+    })
+    sp.stop()
+
+    info('Results (sorted by accuracy):')
+    table(
+      results.map(r => [
+        r.strategy,
+        `${(r.accuracy * 100).toFixed(1)}%`,
+        `${r.correct}/${r.total}`,
+        r.errors.length > 0 ? `${r.errors.length} errors` : '—'
+      ]),
+      ['Strategy', 'Accuracy', 'Correct', 'Errors']
+    )
+
+    if (results.length > 0) {
+      const best = results[0]
+      info(`Best strategy: ${best.strategy} (${(best.accuracy * 100).toFixed(1)}%)`)
+
+      const save = await confirm('Save best few-shot config?')
+      if (save) {
+        const config = {
+          strategy: best.strategy,
+          k,
+          examples: best.examples,
+          accuracy: best.accuracy,
+          evaluatedAt: new Date().toISOString()
+        }
+        const path = await saveFewShotConfig(task.name, config)
+        success(`Saved to ${path}`)
+      }
+    }
+  } catch (e) {
+    sp.stop()
+    error(`Optimization failed: ${e.message}`)
+  }
+}
+
+async function runFewShotConfig(task) {
+  header(`Few-shot config — "${task.name}"`)
+
+  const config = await loadFewShotConfig(task.name)
+  if (!config) {
+    warn('No few-shot config saved. Run "Few-shot optimize" first.')
+    return
+  }
+
+  info(`Strategy: ${config.strategy}`)
+  info(`K: ${config.k}`)
+  info(`Accuracy: ${(config.accuracy * 100).toFixed(1)}%`)
+  info(`Evaluated: ${config.evaluatedAt || 'unknown'}`)
+
+  if (config.examples?.length) {
+    info(`\nSaved examples (${config.examples.length}):`)
+    print('')
+    for (const ex of config.examples) {
+      print(formatExample(ex, task))
+      print('')
+    }
+  }
+}
+
 async function taskMenu(task) {
   while (true) {
     const action = await menu(`Task: ${task.name}`, [
@@ -1507,7 +1969,15 @@ async function taskMenu(task) {
       'Train CRF (sequence labeling)',                  // 36
       'Predict CRF (tag text)',                         // 37
       'Evaluate CRF (entity F1)',                       // 38
-      '← Back'                                         // 39
+      'Train scoring model (regression)',                // 39
+      'Predict scoring (score text)',                    // 40
+      'Evaluate scoring (MSE/correlation)',              // 41
+      'Active learning loop (any task type)',             // 42
+      'Active loop history',                              // 43
+      'Few-shot prompt (select examples)',                // 44
+      'Few-shot optimize (find best set)',                // 45
+      'Few-shot config (view/save)',                      // 46
+      '← Back'                                         // 47
     ])
 
     if (action === 0) await runFullPipeline(task)
@@ -1552,6 +2022,14 @@ async function taskMenu(task) {
     else if (action === 36) await runCRFTrain(task)
     else if (action === 37) await runCRFPredict(task)
     else if (action === 38) await runCRFEval(task)
+    else if (action === 39) await runScoringTrain(task)
+    else if (action === 40) await runScoringPredict(task)
+    else if (action === 41) await runScoringEval(task)
+    else if (action === 42) await runActiveLoop(task)
+    else if (action === 43) await runActiveLoopHistory(task)
+    else if (action === 44) await runFewShotPrompt(task)
+    else if (action === 45) await runFewShotOptimize(task)
+    else if (action === 46) await runFewShotConfig(task)
     else return
   }
 }

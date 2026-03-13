@@ -1,0 +1,11 @@
+{
+  "name": "review-scorer",
+  "type": "scoring",
+  "description": "Score product reviews from 1.0 to 5.0 based on sentiment and helpfulness",
+  "scoreRange": { "min": 1, "max": 5 },
+  "synthetic": {
+    "count": 200,
+    "prompt": "Generate realistic product reviews with varying quality, length, and sentiment. Include a mix of very negative (1.0), negative (2.0), neutral (3.0), positive (4.0), and very positive (5.0) reviews. Use half-point scores for nuance.",
+    "batchSize": 10
+  }
+}

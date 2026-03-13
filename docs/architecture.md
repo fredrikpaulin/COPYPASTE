@@ -29,13 +29,16 @@ index.js
   ├── lib/experiment.js  Experiment tracking via SQLite (file I/O)
   ├── lib/transformer.js Transformer fine-tuning orchestration (process I/O)
   ├── lib/crf.js         Pure JS CRF for sequence labeling (pure logic + file I/O)
+  ├── lib/scoring.js     Pure JS linear regressor for scoring tasks (pure logic + file I/O)
+  ├── lib/active-loop.js Task-agnostic active learning with uncertainty sampling (pure logic + file I/O)
+  ├── lib/few-shot.js    Few-shot prompt optimization and example selection (pure logic + file I/O)
   ├── lib/templates.js   Pre-built task template loading (file I/O)
   ├── lib/report.js      HTML evaluation report generation (file I/O)
   ├── lib/config.js      Config file loading + defaults (file I/O)
   └── lib/log.js         Structured JSONL logging (file I/O)
 ```
 
-`lib/generate.js` imports from `lib/provider.js` for multi-provider support. `lib/embed-cache.js` imports from `lib/embed.js` for cached embedding. `lib/data.js` imports from `lib/embed.js` for semantic deduplication. `lib/curriculum.js` imports from `lib/infer.js` (difficulty scoring), `lib/provider.js` (LLM-as-judge, contrastive), and `lib/generate.js` (ensemble). `lib/multitask.js` imports from `lib/provider.js` (zero-shot eval) and `lib/generate.js` (progressive distillation). `lib/evaluate.js` is mostly self-contained — k-fold CV shells out to Python, feature importance runs an inline Python script, and the pure-JS functions (error taxonomy, calibration, PCA projection) have no imports. `lib/transformer.js` orchestrates `scripts/train_transformer.py` via subprocess — handles dependency detection, device discovery, model presets, and structured output parsing. `lib/crf.js` is entirely self-contained — feature extraction, hashing, Viterbi decoding, training, evaluation, and model persistence all in pure JavaScript with no external dependencies. All modules export functions consumed by `index.js`, which acts as the composition root.
+`lib/generate.js` imports from `lib/provider.js` for multi-provider support. `lib/embed-cache.js` imports from `lib/embed.js` for cached embedding. `lib/data.js` imports from `lib/embed.js` for semantic deduplication. `lib/curriculum.js` imports from `lib/infer.js` (difficulty scoring), `lib/provider.js` (LLM-as-judge, contrastive), and `lib/generate.js` (ensemble). `lib/multitask.js` imports from `lib/provider.js` (zero-shot eval) and `lib/generate.js` (progressive distillation). `lib/evaluate.js` is mostly self-contained — k-fold CV shells out to Python, feature importance runs an inline Python script, and the pure-JS functions (error taxonomy, calibration, PCA projection) have no imports. `lib/transformer.js` orchestrates `scripts/train_transformer.py` via subprocess — handles dependency detection, device discovery, model presets, and structured output parsing. `lib/scoring.js` is entirely self-contained — feature extraction, hashing, SGD training, evaluation, and model persistence all in pure JavaScript with no external dependencies. `lib/active-loop.js` imports from `lib/crf.js` (Viterbi decoding, feature extraction), `lib/scoring.js` (feature extraction, scoring), `lib/infer.js` (classification prediction), `lib/generate.js` (candidate pool generation), `lib/provider.js` (LLM labeling), and `lib/data.js` (JSONL reading). `lib/crf.js` is entirely self-contained — feature extraction, hashing, Viterbi decoding, training, evaluation, and model persistence all in pure JavaScript with no external dependencies. `lib/few-shot.js` imports from `lib/provider.js` (LLM evaluation) and is otherwise self-contained — text similarity, feature extraction, selection strategies, and prompt formatting are all pure JavaScript. All modules export functions consumed by `index.js`, which acts as the composition root.
 
 ## Data flow
 
@@ -226,6 +229,36 @@ Feature extraction produces rich token-level features: word identity, word shape
 `viterbi()` decodes the optimal tag sequence in O(n × T²) where n is sequence length and T is tag count. `extractEntities()` converts BIO tag sequences into entity spans with type, start, end, and text. `evaluateEntities()` computes entity-level precision/recall/F1 per type with micro averaging, plus token-level accuracy. Models are persisted as raw Float64Array binary (weights) plus JSON metadata (tags, hashSize).
 
 Exports: `extractFeatures(tokens, i, prevTag)`, `featureHash(feat, tag, hashSize)`, `fnv1a(str)`, `wordShape(w)`, `viterbi(tokens, tags, weights, hashSize)`, `score(features, tag, weights, hashSize)`, `trainCRF(data, opts)`, `predictSequence(tokens, model)`, `predictBatch(sequences, model)`, `extractEntities(tokens, tags)`, `evaluateEntities(goldData, predictions)`, `saveModel(taskName, model)`, `loadModel(taskName)`, `hasCRFModel(taskName)`, `labelsToBIO(labels)`, `validateBIO(tags)`.
+
+## lib/scoring.js
+
+Pure JavaScript linear regressor for scoring/regression tasks — predicting continuous values from text. Uses SGD (stochastic gradient descent) with L2 regularization on hashed features.
+
+Feature extraction produces rich text features: word unigrams, word bigrams, character trigrams (first 200 chars), word count, character count, punctuation density, capitalization ratio, and boolean indicators (has digits, exclamation, question mark). Features are hashed via FNV-1a with a sign trick (reduces collision impact) to a fixed-size weight vector (default 2^16).
+
+`trainScoring()` runs SGD with configurable epochs, learning rate (with 5% decay per epoch), and L2 regularization. Automatically detects value range from data or accepts explicit min/max. `predictScore()` computes a dot product and clamps to the training range. `evaluateScoring()` computes MSE, MAE, RMSE, Pearson correlation, and R-squared. Models are persisted as raw Float64Array binary (weights) plus JSON metadata (hashSize, min/max range).
+
+Exports: `extractTextFeatures(text)`, `hashFeature(feat, hashSize)`, `featureVector(features, hashSize)`, `fnv1a(str)`, `scoreText(features, weights, hashSize)`, `trainScoring(data, opts)`, `predictScore(text, model)`, `predictScoreBatch(texts, model)`, `evaluateScoring(data, predictions)`, `saveScoringModel(taskName, model)`, `loadScoringModel(taskName)`, `hasScoringModel(taskName)`.
+
+## lib/active-loop.js
+
+Task-agnostic active learning loop that measures model uncertainty across all task types and selects the most informative examples for LLM labeling. Reduces API cost by focusing generation on examples where the small model is least confident.
+
+Three uncertainty strategies: classification uses 1 - softmax confidence from the Python prediction subprocess. Sequence labeling uses Viterbi margin — re-runs the CRF dynamic programming forward pass to get the top two final path scores, with low margin indicating the model is torn between two tag sequences. Scoring uses feature dropout variance — predicts multiple times with random feature subsets dropped, then measures standard deviation of the resulting scores.
+
+`computeUncertainty(task, pool, opts)` routes to the correct strategy based on `task.type`. `selectMostUncertain(uncertainties, opts)` sorts by uncertainty descending and returns the top-K. `activeLoop(task, opts)` orchestrates a full iteration: generates a candidate pool via LLM, scores uncertainty with the current model, selects the most uncertain, sends them to the LLM for labeling, and returns the results. `llmLabelForTask(task, selected, opts)` builds task-type-specific prompts and parses JSON array responses. `saveActiveIteration()` and `loadActiveHistory()` persist iteration history. `appendLabeledData()` appends labeled examples to the synthetic JSONL file.
+
+Exports: `entropy(probs)`, `classificationUncertainty(taskName, texts)`, `sequenceLabelingUncertainty(taskName, sequences, model)`, `scoringUncertainty(texts, model, opts)`, `crfMargin(tokens, model)`, `computeUncertainty(task, pool, opts)`, `selectMostUncertain(uncertainties, opts)`, `activeLoop(task, opts)`, `llmLabelForTask(task, selected, opts)`, `buildClassificationLabelPrompt(task, selected)`, `buildSequenceLabelPrompt(task, selected)`, `buildScoringLabelPrompt(task, selected)`, `saveActiveIteration(taskName, iteration)`, `loadActiveHistory(taskName)`, `appendLabeledData(taskName, labeled, taskType)`.
+
+## lib/few-shot.js
+
+Few-shot prompt optimization — selects the best subset of training examples to use as demonstrations in LLM prompts. Supports four selection strategies: random (baseline), balanced (round-robin across classes/score-buckets), diverse (greedy set-cover over extracted features), and similar (Jaccard over unigram + bigram sets, weighted 60/40).
+
+Feature extraction for diversity produces word features, label/bucket indicators, tag types, and length buckets. `selectExamples()` routes to any strategy by name. `formatExample()` produces clean input/output pairs for each task type. `buildFewShotPrompt()` assembles a complete prompt with task header, demos, and query.
+
+`evaluatePromptSet()` scores a candidate few-shot set by running LLM inference on validation examples and computing accuracy. `optimizeFewShot()` tests multiple strategies (including multiple random trials), evaluates each, and returns results sorted by accuracy. Configurations are persisted as JSON.
+
+Exports: `tokenize(text)`, `ngrams(tokens, n)`, `jaccard(setA, setB)`, `textSimilarity(a, b)`, `exampleFeatures(example, task)`, `selectRandom(examples, opts)`, `selectBalanced(examples, task, opts)`, `selectDiverse(examples, task, opts)`, `selectSimilar(examples, query, opts)`, `selectExamples(strategy, examples, task, opts)`, `formatExample(example, task)`, `buildFewShotPrompt(task, examples, query)`, `taskHeader(task)`, `evaluatePromptSet(task, fewShot, val, opts)`, `optimizeFewShot(task, train, val, opts)`, `saveFewShotConfig(taskName, config)`, `loadFewShotConfig(taskName)`.
 
 ## scripts/train.py
 

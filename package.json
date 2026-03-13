@@ -1,6 +1,6 @@
 {
   "name": "copypaste",
-  "version": "0.1.10",
+  "version": "0.1.13",
   "description": "Train small, task-specific models from LLM-generated data. Define a task, generate synthetic examples via Claude, and train a scikit-learn model — all from an interactive TUI.",
   "module": "index.js",
   "type": "module",

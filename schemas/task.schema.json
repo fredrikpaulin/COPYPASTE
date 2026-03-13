@@ -11,7 +11,7 @@
     },
     "type": {
       "type": "string",
-      "enum": ["classification", "extraction", "regression", "sequence-labeling"],
+      "enum": ["classification", "extraction", "regression", "scoring", "sequence-labeling"],
       "description": "What kind of model we're training"
     },
     "description": {
@@ -38,6 +38,14 @@
         "batchSize": { "type": "integer", "minimum": 1, "default": 10 }
       },
       "required": ["count", "prompt"]
+    },
+    "scoreRange": {
+      "type": "object",
+      "properties": {
+        "min": { "type": "number", "default": 0 },
+        "max": { "type": "number", "default": 5 }
+      },
+      "description": "Score range for scoring/regression tasks (e.g. {min: 0, max: 5} for star ratings)"
     },
     "realData": {
       "type": "object",
