@@ -1,5 +1,118 @@
 # Changelog
 
+## 0.1.7
+
+### Ensemble inference (Phase 11)
+
+- Train all three algorithms (logistic regression, SVM, random forest) into side-by-side ensemble models
+- `ensemblePredict()` — weighted majority vote across all trained algorithms, weighted by validation accuracy
+- Agreement tracking — what fraction of models agree on the winning label
+- Confidence threshold rejection — predictions below a configurable threshold return `rejected: true` instead of a label
+- `predictWithThreshold()` — single-model prediction with rejection for low-confidence outputs
+- TUI screens: "Train ensemble", "Predict (ensemble)", "Predict (confidence threshold)"
+
+### Experiment tracking (Phase 11)
+
+- SQLite-backed experiment log (`lib/experiment.js`) via `bun:sqlite` — records every training run automatically
+- Each experiment stores: task, algorithm, accuracy, train/val size, data fingerprint (FNV-1a hash), feature mode, dimensionality reduction, hyperparams, duration, labels, notes
+- `hashDataset()` — fast deterministic fingerprint over all texts and labels in a dataset
+- `listExperiments()`, `getExperiment()`, `bestExperiment()`, `experimentStats()` for querying history
+- `compareExperiments()` — side-by-side diff showing accuracy delta, data/algorithm changes
+- Automatic recording on every `runTrain()` and ensemble training call
+- TUI screen: "Experiment history" with comparison workflow
+
+### Tests
+
+- New `test/phase11.test.js` — ensemble exports (5), hashDataset (5), experiment CRUD (10), hyperparams serialization (2)
+- 246 tests passing across 15 files
+
+## 0.1.6
+
+### Evaluation and interpretability (Phase 10)
+
+- K-fold cross-validation (`kFoldCV`) — split data into k folds, train/evaluate each, report mean ± std accuracy
+- `kFoldSplit()` with Fisher-Yates shuffle and disjoint validation sets
+- Feature importance extraction via inline Python — top TF-IDF coefficients per label, random forest importances
+- Error taxonomy — categorize misclassifications by confusion pair, text length, and data provider
+- Calibration analysis — reliability bins with Expected Calibration Error (ECE)
+- 2D data map projection (`projectTo2D`) — power iteration PCA in pure JS for embedding visualization
+- TUI screens: "K-fold CV", "Feature importance", "Error taxonomy", "Calibration analysis"
+
+### Tests
+
+- New `test/phase10.test.js` — kFoldSplit (5), errorTaxonomy (6), calibrationBins (4), projectTo2D (4), export checks (2)
+- 224 tests passing across 14 files
+
+## 0.1.5
+
+### Multi-task and transfer learning (Phase 9)
+
+- Shared feature training (`sharedFeatureTraining`) — collect texts across tasks for shared TF-IDF vocabulary
+- Zero-shot bootstrap (`zeroShotEval`) — evaluate LLM directly on validation data as accuracy baseline
+- Progressive distillation (`progressiveDistill`) — chain large provider → local Ollama → tag provenance for staged distillation
+- TUI screen: "Zero-shot eval"
+
+### Tests
+
+- New `test/phase9.test.js` — sharedFeatureTraining (2), zeroShotEval structure (2), progressiveDistill export (1)
+
+## 0.1.4
+
+### Curriculum and data strategy (Phase 8)
+
+- Curriculum learning — `scoreDifficulty()` uses model confidence as difficulty proxy, `sortByCurriculum()` orders easy→hard
+- `curriculumStages()` splits data into easy/medium/hard buckets with configurable thresholds
+- LLM-as-judge quality scoring (`llmJudge`) — rates examples on relevance, naturalness, label correctness rubric via callProvider
+- `filterByQuality()` removes examples below a quality threshold
+- Contrastive example generation (`generateContrastive`) — hard negatives near decision boundaries between label pairs
+- Cross-provider ensembling (`ensembleGenerate`) — generate from multiple providers, tag `_provider` provenance
+- TUI screens: "Curriculum analysis", "LLM-as-judge", "Contrastive generation", "Ensemble generate"
+
+### Tests
+
+- New `test/phase8.test.js` — sortByCurriculum (3), curriculumStages (3), filterByQuality (3), generateContrastive validation (2), llmJudge integration (1)
+
+## 0.1.3
+
+### Sentence embeddings (Phase 7)
+
+- Embedding abstraction (`lib/embed.js`) — unified interface for OpenAI and Ollama embedding APIs
+- `embed()` function with batching, progress callbacks, and per-provider response parsing
+- `resolveEmbedProvider()` and `listEmbedProviders()` for provider configuration
+- `cosineSimilarity()` for vector comparison
+
+### Embedding cache (Phase 7)
+
+- SQLite-backed embedding cache (`lib/embed-cache.js`) via `bun:sqlite` — zero dependencies
+- Keyed by (text_hash, model) for efficient dedup across re-training runs
+- `cachedEmbed()` wrapper that transparently caches embeddings — only embeds texts not already cached
+- Batch get/put operations, per-model count and clear
+- Float32Array binary packing for compact storage
+
+### Semantic deduplication (Phase 7)
+
+- `semanticDeduplicate()` in `lib/data.js` — cosine similarity on embeddings catches paraphrases that trigram matching misses
+- Configurable similarity threshold (default 0.92)
+- "Semantic dedup" option in the TUI task menu
+
+### Embedding-based training (Phase 7)
+
+- Training path that uses pre-computed embeddings as features instead of TF-IDF
+- `load_embeddings()` and `reduce_dimensions()` in `scripts/train.py`
+- Optional PCA or truncated SVD dimensionality reduction with configurable target dimensions
+- `--train-embeddings`, `--val-embeddings`, `--dim-reduce`, `--n-components` CLI flags
+- "Train model (embeddings)" option in the TUI — embeds texts, writes JSONL, trains classifier
+
+### TUI updates
+
+- Task menu expanded to 19 items: added "Semantic dedup", "Train model (embeddings)", "Embedding cache stats"
+- Existing "Train model" renamed to "Train model (TF-IDF)" for clarity
+
+### Tests
+
+- New `test/phase7.test.js` — 24 tests covering cosine similarity (5), provider resolution (3), provider listing (1), mock OpenAI integration (2), mock Ollama integration (1), cache CRUD (7), pack/unpack (1), semantic dedup (2), Python embedding training (2)
+- 186 tests passing across 11 files
+
 ## 0.1.2
 
 ### Multi-provider generation (Phase 6)

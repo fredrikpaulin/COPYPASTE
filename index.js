@@ -4,14 +4,21 @@ import {
 } from './lib/tui.js'
 import { loadTask, listTasks, saveTask } from './lib/task.js'
 import { generate, preview } from './lib/generate.js'
-import { loadAndMerge, split, stats, deduplicate, augment, labelImbalance, filterByConfidence } from './lib/data.js'
+import { loadAndMerge, split, stats, deduplicate, augment, labelImbalance, filterByConfidence, semanticDeduplicate } from './lib/data.js'
 import { runTraining, versionModel, listVersions } from './lib/train.js'
 import { predict, loadMeta, listModels } from './lib/infer.js'
 import { bundle } from './lib/bundle.js'
 import { getUncertainExamples, generateAndRankByUncertainty, llmLabel, loadHistory, saveIteration } from './lib/active.js'
 import { listProviders, resolveProvider } from './lib/provider.js'
+import { resolveEmbedProvider, listEmbedProviders } from './lib/embed.js'
+import { cachedEmbed, createEmbedCache } from './lib/embed-cache.js'
 import { listTemplates, loadTemplate } from './lib/templates.js'
 import { generateReport } from './lib/report.js'
+import { scoreDifficulty, sortByCurriculum, curriculumStages, llmJudge, filterByQuality, generateContrastive, ensembleGenerate } from './lib/curriculum.js'
+import { zeroShotEval, progressiveDistill } from './lib/multitask.js'
+import { kFoldCV, featureImportance, errorTaxonomy, calibrationBins, projectTo2D } from './lib/evaluate.js'
+import { trainEnsembleModels, listEnsembleModels, ensemblePredict, predictWithThreshold } from './lib/ensemble.js'
+import { recordExperiment, listExperiments, compareExperiments, bestExperiment, experimentStats, hashDataset } from './lib/experiment.js'
 import { loadConfig } from './lib/config.js'
 import { startLog, logEntry, flushLog } from './lib/log.js'
 
@@ -271,7 +278,7 @@ async function runConfidenceFilter(task) {
   success(`Kept ${result.data.length}/${data.length} examples (${result.removed} removed)`)
 }
 
-async function runTrain(task, splitResult, { algorithm, compare = false, search = false, grid } = {}) {
+async function runTrain(task, splitResult, { algorithm, compare = false, search = false, grid, trainEmbeddings, valEmbeddings, dimReduce, nComponents } = {}) {
   header(`Training model for "${task.name}"`)
 
   // Version existing model before overwriting
@@ -285,6 +292,7 @@ async function runTrain(task, splitResult, { algorithm, compare = false, search 
 
   const label = compare ? 'Comparing algorithms...' : search ? 'Searching hyperparameters...' : 'Training in progress...'
   const sp = spinner(label)
+  const startTime = Date.now()
   try {
     const result = await runTraining(task, splitResult.train.path, splitResult.val.path, {
       onnx: !compare && !search,
@@ -292,6 +300,10 @@ async function runTrain(task, splitResult, { algorithm, compare = false, search 
       compare,
       search,
       grid,
+      trainEmbeddings,
+      valEmbeddings,
+      dimReduce,
+      nComponents,
       onStdout: text => {
         for (const line of text.split('\n').filter(Boolean)) {
           if (line.includes('Accuracy')) {
@@ -317,7 +329,32 @@ async function runTrain(task, splitResult, { algorithm, compare = false, search 
       },
       onStderr: text => dim(text.trim())
     })
+    const durationMs = Date.now() - startTime
     success(`Model saved to ${result.modelDir}`)
+
+    // Record experiment automatically
+    if (!compare && !search) {
+      try {
+        const { readJsonl } = await import('./lib/data.js')
+        const trainData = await readJsonl(splitResult.train.path)
+        const valData = await readJsonl(splitResult.val.path)
+        const newMeta = await loadMeta(task.name)
+        recordExperiment({
+          task: task.name,
+          algorithm: algorithm || 'logistic_regression',
+          accuracy: newMeta?.accuracy ?? null,
+          trainSize: trainData.length,
+          valSize: valData.length,
+          dataHash: hashDataset(trainData),
+          featureMode: trainEmbeddings ? 'embeddings' : 'tfidf',
+          dimReduce: dimReduce || null,
+          nComponents: nComponents ?? null,
+          labels: task.labels || null,
+          durationMs
+        })
+        dim('  Experiment recorded.')
+      } catch {}
+    }
   } catch (e) {
     sp.fail('Training failed')
     error(e.message)
@@ -517,45 +554,637 @@ async function runActiveLearningHistory(task) {
   )
 }
 
+async function runEmbedTrain(task) {
+  header(`Train with embeddings for "${task.name}"`)
+
+  const providers = listEmbedProviders().filter(p => p.configured)
+  if (!providers.length) {
+    warn('No embedding providers configured.')
+    dim('Set OPENAI_API_KEY or ensure Ollama is running.')
+    return
+  }
+
+  const provIdx = await menu('Embedding provider:', providers.map(p => `${p.name} (${p.defaultModel})`))
+  const provider = providers[provIdx]
+
+  // Dimensionality reduction option
+  const reduceIdx = await menu('Dimensionality reduction:', ['None', 'PCA', 'SVD (truncated)'])
+  const dimReduce = reduceIdx === 0 ? null : reduceIdx === 1 ? 'pca' : 'svd'
+  let nComponents = 50
+  if (dimReduce) {
+    const nStr = await prompt('Target dimensions [50]:')
+    nComponents = parseInt(nStr) || 50
+  }
+
+  // Prepare data first
+  const splitResult = await runPrepare(task)
+  if (!splitResult) return
+
+  // Load the split data
+  const { readJsonl, writeJsonl } = await import('./lib/data.js')
+  const trainData = await readJsonl(splitResult.train.path)
+  const valData = await readJsonl(splitResult.val.path)
+
+  // Embed training data
+  const sp = spinner(`Embedding ${trainData.length + valData.length} texts with ${provider.name}...`)
+  try {
+    const allTexts = [...trainData.map(d => d.text), ...valData.map(d => d.text)]
+    const allEmbeddings = await cachedEmbed(provider.key, allTexts, {
+      model: provider.defaultModel,
+      onProgress: (done, total) => sp.stop(`Embedded ${done}/${total}`)
+    })
+
+    const trainEmbeddings = allEmbeddings.slice(0, trainData.length)
+    const valEmbeddings = allEmbeddings.slice(trainData.length)
+
+    sp.stop(`Embedded ${allTexts.length} texts (${trainEmbeddings[0].length} dimensions)`)
+
+    // Write embeddings to JSONL for the Python training script
+    const { join } = await import('node:path')
+    const trainEmbPath = join('data', `${task.name}_train_embeddings.jsonl`)
+    const valEmbPath = join('data', `${task.name}_val_embeddings.jsonl`)
+    await writeJsonl(trainEmbPath, trainEmbeddings.map(e => ({ embedding: e })))
+    await writeJsonl(valEmbPath, valEmbeddings.map(e => ({ embedding: e })))
+
+    info(`Embeddings saved: ${trainEmbPath}, ${valEmbPath}`)
+
+    // Run training with embeddings
+    await runTrain(task, splitResult, {
+      trainEmbeddings: trainEmbPath,
+      valEmbeddings: valEmbPath,
+      dimReduce,
+      nComponents
+    })
+  } catch (e) {
+    sp.fail('Embedding failed')
+    error(e.message)
+  }
+}
+
+async function runSemanticDedup(task) {
+  header(`Semantic deduplication for "${task.name}"`)
+
+  const providers = listEmbedProviders().filter(p => p.configured)
+  if (!providers.length) {
+    warn('No embedding providers configured.')
+    return
+  }
+
+  const data = await loadAndMerge(task)
+  if (!data.length) { warn('No data found.'); return }
+
+  const provIdx = await menu('Embedding provider:', providers.map(p => `${p.name} (${p.defaultModel})`))
+  const provider = providers[provIdx]
+
+  const thresholdStr = await prompt('Similarity threshold (0.0-1.0) [0.92]:')
+  const threshold = parseFloat(thresholdStr) || 0.92
+
+  const sp = spinner(`Embedding ${data.length} texts...`)
+  try {
+    const texts = data.map(d => d.text)
+    const embeddings = await cachedEmbed(provider.key, texts, {
+      model: provider.defaultModel,
+      onProgress: (done, total) => sp.stop(`Embedded ${done}/${total}`)
+    })
+
+    sp.stop(`Embedded ${data.length} texts, finding semantic duplicates...`)
+
+    const result = await semanticDeduplicate(data, embeddings, { threshold })
+    success(`Removed ${result.removed} semantic duplicates (${data.length} → ${result.data.length})`)
+  } catch (e) {
+    sp.fail('Semantic dedup failed')
+    error(e.message)
+  }
+}
+
+async function runEmbedCacheStats() {
+  header('Embedding cache stats')
+
+  try {
+    const { join } = await import('node:path')
+    const cachePath = join('data', 'embed_cache.sqlite')
+    const file = Bun.file(cachePath)
+    if (!await file.exists()) {
+      warn('No embedding cache found yet.')
+      return
+    }
+
+    const cache = createEmbedCache(cachePath)
+    const providers = listEmbedProviders()
+    const rows = []
+    for (const p of providers) {
+      const count = cache.count(p.defaultModel)
+      if (count > 0) rows.push([p.name, p.defaultModel, count])
+    }
+    cache.close()
+
+    if (rows.length) {
+      table(rows, ['Provider', 'Model', 'Cached'])
+    } else {
+      info('Cache is empty.')
+    }
+  } catch (e) {
+    error(e.message)
+  }
+}
+
+// ── Phase 8: Curriculum & Data Strategy ──────────────────
+
+async function runCurriculumAnalysis(task) {
+  header(`Curriculum analysis for "${task.name}"`)
+  const meta = await loadMeta(task.name)
+  if (!meta) { warn('No trained model found. Train one first.'); return }
+
+  const data = await loadAndMerge(task)
+  if (!data.length) { warn('No data found.'); return }
+
+  const sp = spinner('Scoring example difficulty...')
+  try {
+    const scored = await scoreDifficulty(task.name, data)
+    const stages = curriculumStages(scored)
+    sp.stop(`Scored ${scored.length} examples`)
+
+    table([
+      ['Easy (confident)', stages.easy.length],
+      ['Medium', stages.medium.length],
+      ['Hard (uncertain)', stages.hard.length],
+      ['Misclassified', scored.filter(d => !d._correct).length]
+    ], ['Stage', 'Count'])
+  } catch (e) {
+    sp.fail('Scoring failed')
+    error(e.message)
+  }
+}
+
+async function runLLMJudge(task) {
+  if (!API_KEY) { error('Set ANTHROPIC_API_KEY in your environment'); return }
+  header(`LLM-as-judge scoring for "${task.name}"`)
+
+  const data = await loadAndMerge(task)
+  if (!data.length) { warn('No data found.'); return }
+
+  const thresholdStr = await prompt('Quality threshold (0.0-1.0) [0.7]:')
+  const threshold = parseFloat(thresholdStr) || 0.7
+
+  const sp = spinner(`Scoring ${data.length} examples...`)
+  const scored = await llmJudge(data, task, {
+    apiKey: API_KEY,
+    onProgress: (done, total) => sp.stop(`Scored ${done}/${total}`)
+  })
+  sp.stop(`Scored ${scored.length} examples`)
+
+  const result = filterByQuality(scored, threshold)
+  success(`Kept ${result.data.length}/${scored.length} examples (${result.removed} below threshold ${threshold})`)
+
+  // Show quality distribution
+  const high = scored.filter(d => d._quality >= 0.8).length
+  const mid = scored.filter(d => d._quality >= 0.5 && d._quality < 0.8).length
+  const low = scored.filter(d => d._quality < 0.5).length
+  table([['High (≥0.8)', high], ['Medium (0.5-0.8)', mid], ['Low (<0.5)', low]], ['Quality', 'Count'])
+}
+
+async function runContrastive(task) {
+  if (!API_KEY) { error('Set ANTHROPIC_API_KEY in your environment'); return }
+  if (task.type !== 'classification') { warn('Contrastive generation requires a classification task'); return }
+
+  header(`Contrastive generation for "${task.name}"`)
+  const countStr = await prompt('Examples per label pair [5]:')
+  const count = parseInt(countStr) || 5
+
+  const sp = spinner('Generating contrastive examples...')
+  try {
+    const examples = await generateContrastive(task, {
+      apiKey: API_KEY,
+      count,
+      onProgress: (done, total) => sp.stop(`Generated pair ${done}/${total}`)
+    })
+    sp.stop(`Generated ${examples.length} contrastive examples`)
+
+    if (examples.length) {
+      table(
+        examples.slice(0, 10).map((e, i) => [i + 1, e.text?.slice(0, 40) + '...', e.label, e._confused_with || '?']),
+        ['#', 'Text', 'Label', 'Confused with']
+      )
+    }
+  } catch (e) {
+    sp.fail('Generation failed')
+    error(e.message)
+  }
+}
+
+async function runEnsembleGenerate(task) {
+  if (!API_KEY) { error('Set ANTHROPIC_API_KEY in your environment'); return }
+  header(`Cross-provider ensemble for "${task.name}"`)
+
+  const available = listProviders().filter(p => p.configured)
+  if (available.length < 2) { warn('Need at least 2 configured providers.'); return }
+
+  info(`Available: ${available.map(p => p.name).join(', ')}`)
+  const countStr = await prompt('Total examples to generate [100]:')
+  const count = parseInt(countStr) || 100
+
+  const sp = spinner('Generating from multiple providers...')
+  try {
+    const all = await ensembleGenerate(task, available, {
+      apiKey: API_KEY,
+      count,
+      onProgress: (done, total) => sp.stop(`Generated ${done}/${total}`)
+    })
+    sp.stop(`Generated ${all.length} examples from ${available.length} providers`)
+
+    const byProvider = {}
+    for (const row of all) {
+      const p = row._provider || 'unknown'
+      byProvider[p] = (byProvider[p] || 0) + 1
+    }
+    table(Object.entries(byProvider).map(([k, v]) => [k, v]), ['Provider', 'Count'])
+  } catch (e) {
+    sp.fail('Ensemble generation failed')
+    error(e.message)
+  }
+}
+
+// ── Phase 9: Multi-task & Transfer Learning ──────────────
+
+async function runZeroShot(task) {
+  if (!API_KEY) { error('Set ANTHROPIC_API_KEY in your environment'); return }
+  if (task.type !== 'classification') { warn('Zero-shot eval requires a classification task'); return }
+
+  header(`Zero-shot evaluation for "${task.name}"`)
+
+  const { readJsonl } = await import('./lib/data.js')
+  const valPath = join('data', `${task.name}_val.jsonl`)
+  let valData
+  try { valData = await readJsonl(valPath) } catch { warn('No validation data. Run prepare first.'); return }
+
+  const sp = spinner(`Classifying ${valData.length} examples with LLM...`)
+  const result = await zeroShotEval(task, valData, {
+    apiKey: API_KEY,
+    onProgress: (done, total) => sp.stop(`Classified ${done}/${total}`)
+  })
+  sp.stop(`Zero-shot evaluation complete`)
+
+  success(`Zero-shot accuracy: ${(result.accuracy * 100).toFixed(1)}% (${result.correct}/${result.total})`)
+
+  const meta = await loadMeta(task.name)
+  if (meta) {
+    const delta = result.accuracy - meta.accuracy
+    info(`Trained model accuracy: ${(meta.accuracy * 100).toFixed(1)}% (${delta > 0 ? 'LLM is better by' : 'distilled model wins by'} ${(Math.abs(delta) * 100).toFixed(1)}pp)`)
+  }
+}
+
+// ── Phase 10: Evaluation & Interpretability ──────────────
+
+async function runKFoldCV(task) {
+  header(`K-fold cross-validation for "${task.name}"`)
+
+  const data = await loadAndMerge(task)
+  if (data.length < 10) { warn('Need at least 10 examples for cross-validation.'); return }
+
+  const kStr = await prompt('Number of folds [5]:')
+  const k = parseInt(kStr) || 5
+
+  const algoIdx = await menu('Algorithm:', ['logistic_regression', 'svm', 'random_forest'])
+  const algorithm = ['logistic_regression', 'svm', 'random_forest'][algoIdx]
+
+  info(`Running ${k}-fold cross-validation with ${algorithm}...`)
+  const result = await kFoldCV(task, data, {
+    k,
+    algorithm,
+    onFold: (fold, total, acc) => info(`  Fold ${fold}/${total}: ${(acc * 100).toFixed(1)}%`)
+  })
+
+  success(`Mean accuracy: ${(result.mean * 100).toFixed(1)}% ± ${(result.std * 100).toFixed(1)}%`)
+  table(
+    result.scores.map((s, i) => [`Fold ${i + 1}`, (s * 100).toFixed(1) + '%']),
+    ['Fold', 'Accuracy']
+  )
+}
+
+async function runFeatureImportance(task) {
+  header(`Feature importance for "${task.name}"`)
+
+  const meta = await loadMeta(task.name)
+  if (!meta) { warn('No trained model found.'); return }
+
+  const sp = spinner('Extracting features...')
+  try {
+    const importance = await featureImportance(task.name)
+    sp.stop('Done')
+
+    if (importance.error) { warn(importance.error); return }
+
+    for (const [label, features] of Object.entries(importance)) {
+      info(`\n  Label: ${label}`)
+      table(
+        features.slice(0, 10).map((f, i) => [i + 1, f.feature, f.weight.toFixed(4)]),
+        ['#', 'Feature', 'Weight']
+      )
+    }
+  } catch (e) {
+    sp.fail('Failed')
+    error(e.message)
+  }
+}
+
+async function runErrorTaxonomy(task) {
+  header(`Error taxonomy for "${task.name}"`)
+
+  const meta = await loadMeta(task.name)
+  if (!meta) { warn('No trained model found.'); return }
+
+  const { readJsonl } = await import('./lib/data.js')
+  const valPath = join('data', `${task.name}_val.jsonl`)
+  let valData
+  try { valData = await readJsonl(valPath) } catch { warn('No validation data.'); return }
+
+  const sp = spinner('Analyzing errors...')
+  const predictions = await predict(task.name, valData.map(d => d.text))
+  const taxonomy = errorTaxonomy(valData, predictions)
+  sp.stop(`${taxonomy.totalErrors} errors / ${taxonomy.totalErrors + taxonomy.totalCorrect} total`)
+
+  if (taxonomy.topConfusions.length) {
+    info('\nTop confusion pairs:')
+    table(
+      taxonomy.topConfusions.map(c => [c.pair, c.count]),
+      ['Confusion', 'Count']
+    )
+  }
+
+  info('\nErrors by text length:')
+  table(
+    [['Short (<50 chars)', taxonomy.byTextLength.short], ['Medium (50-150)', taxonomy.byTextLength.medium], ['Long (>150)', taxonomy.byTextLength.long]],
+    ['Length', 'Errors']
+  )
+}
+
+async function runCalibration(task) {
+  header(`Calibration analysis for "${task.name}"`)
+
+  const meta = await loadMeta(task.name)
+  if (!meta) { warn('No trained model found.'); return }
+
+  const { readJsonl } = await import('./lib/data.js')
+  const valPath = join('data', `${task.name}_val.jsonl`)
+  let valData
+  try { valData = await readJsonl(valPath) } catch { warn('No validation data.'); return }
+
+  const sp = spinner('Running calibration analysis...')
+  const predictions = await predict(task.name, valData.map(d => d.text))
+  const actual = valData.map(d => d.label)
+  const cal = calibrationBins(predictions, actual)
+  sp.stop('Done')
+
+  if (!cal.hasConfidence) { warn('Model does not provide confidence scores (e.g. SVM). Try logistic regression.'); return }
+
+  success(`Expected Calibration Error (ECE): ${(cal.ece * 100).toFixed(2)}%`)
+
+  const binRows = cal.bins.map((b, i) => {
+    const lo = (i / cal.bins.length * 100).toFixed(0)
+    const hi = ((i + 1) / cal.bins.length * 100).toFixed(0)
+    return [`${lo}-${hi}%`, b.predictions, b.correct, b.predictions > 0 ? (b.avgAccuracy * 100).toFixed(1) + '%' : '-']
+  }).filter(r => r[1] > 0)
+
+  table(binRows, ['Confidence', 'Predictions', 'Correct', 'Accuracy'])
+
+  if (cal.ece < 0.05) info('Model is well-calibrated.')
+  else if (cal.ece < 0.15) warn('Model is slightly miscalibrated.')
+  else warn('Model is poorly calibrated — consider Platt scaling.')
+}
+
+// ── Phase 11: Ensemble & Experiments ──────────────────────
+
+async function runTrainEnsemble(task) {
+  header(`Train ensemble for "${task.name}"`)
+
+  const splitResult = await runPrepare(task)
+  if (!splitResult) return
+
+  const sp = spinner('Training all algorithms...')
+  try {
+    const result = await trainEnsembleModels(task, splitResult.train.path, splitResult.val.path, {
+      onAlgorithm: algo => sp.stop(`Training ${algo}...`),
+      onStdout: () => {},
+      onStderr: () => {}
+    })
+    sp.stop(`Trained ${result.models.length} models`)
+
+    table(
+      result.models.map(m => [m.algorithm, (m.accuracy * 100).toFixed(1) + '%']),
+      ['Algorithm', 'Accuracy']
+    )
+
+    // Record each as an experiment
+    const { readJsonl } = await import('./lib/data.js')
+    const trainData = await readJsonl(splitResult.train.path)
+    const dHash = hashDataset(trainData)
+    for (const m of result.models) {
+      recordExperiment({
+        task: task.name,
+        algorithm: m.algorithm,
+        accuracy: m.accuracy,
+        trainSize: splitResult.train.count,
+        valSize: splitResult.val.count,
+        dataHash: dHash,
+        featureMode: 'tfidf',
+        labels: task.labels || null,
+        notes: 'ensemble training'
+      })
+    }
+    dim('  Experiments recorded.')
+  } catch (e) {
+    sp.fail('Ensemble training failed')
+    error(e.message)
+  }
+}
+
+async function runEnsemblePredict(task) {
+  header(`Ensemble predict for "${task.name}"`)
+
+  const models = await listEnsembleModels(task.name)
+  if (!models.length) {
+    warn('No ensemble models found. Run "Train ensemble" first.')
+    return
+  }
+
+  info(`Ensemble: ${models.map(m => m.algorithm).join(', ')}`)
+
+  const thresholdStr = await prompt('Rejection threshold (0 = accept all) [0]:')
+  const threshold = parseFloat(thresholdStr) || 0
+
+  while (true) {
+    const text = await prompt('Enter text (or "back" to return):')
+    if (text.toLowerCase() === 'back') return
+
+    try {
+      const results = await ensemblePredict(task.name, [text], { threshold })
+      const r = results[0]
+      if (r.rejected) {
+        warn(`Rejected (confidence: ${(r.confidence * 100).toFixed(1)}% < threshold ${(threshold * 100).toFixed(1)}%)`)
+        dim(`  Votes: ${JSON.stringify(r.votes)}`)
+      } else {
+        success(`Label: ${r.label}  (confidence: ${(r.confidence * 100).toFixed(1)}%, agreement: ${(r.agreement * 100).toFixed(0)}%)`)
+        dim(`  Per model: ${r.perModel.map(m => `${m.algorithm}=${m.label}`).join(', ')}`)
+      }
+    } catch (e) {
+      error(e.message)
+    }
+  }
+}
+
+async function runThresholdPredict(task) {
+  header(`Predict with confidence threshold for "${task.name}"`)
+
+  const meta = await loadMeta(task.name)
+  if (!meta) { warn('No trained model found.'); return }
+
+  const thresholdStr = await prompt('Rejection threshold [0.5]:')
+  const threshold = parseFloat(thresholdStr) || 0.5
+  info(`Rejecting predictions below ${(threshold * 100).toFixed(0)}% confidence`)
+
+  while (true) {
+    const text = await prompt('Enter text (or "back" to return):')
+    if (text.toLowerCase() === 'back') return
+
+    try {
+      const results = await predictWithThreshold(task.name, [text], { threshold })
+      const r = results[0]
+      if (r.rejected) {
+        warn(`Rejected: ${r.label} (confidence: ${(r.confidence * 100).toFixed(1)}% — below threshold)`)
+      } else {
+        success(`Label: ${r.label}  (confidence: ${((r.confidence || 0) * 100).toFixed(1)}%)`)
+      }
+    } catch (e) {
+      error(e.message)
+    }
+  }
+}
+
+async function runExperimentHistory(task) {
+  header(`Experiment history for "${task.name}"`)
+
+  const experiments = listExperiments(task.name)
+  if (!experiments.length) {
+    warn('No experiments recorded yet. Train a model to start tracking.')
+    return
+  }
+
+  const stats = experimentStats(task.name)
+  info(`${stats.total} experiments | ${stats.algorithms_tried} algorithms | ${stats.data_versions} data versions`)
+  info(`Best: ${(stats.best_accuracy * 100).toFixed(1)}% | Avg: ${(stats.avg_accuracy * 100).toFixed(1)}% | Worst: ${(stats.worst_accuracy * 100).toFixed(1)}%`)
+
+  table(
+    experiments.slice(0, 20).map(e => [
+      e.id,
+      e.timestamp?.slice(0, 19),
+      e.algorithm || '?',
+      e.accuracy != null ? (e.accuracy * 100).toFixed(1) + '%' : '-',
+      e.train_size || '-',
+      e.feature_mode || 'tfidf',
+      e.data_hash?.slice(0, 8) || '-'
+    ]),
+    ['ID', 'Timestamp', 'Algorithm', 'Accuracy', 'Train', 'Features', 'Data hash']
+  )
+
+  // Offer comparison
+  if (experiments.length >= 2) {
+    const compareChoice = await menu('Compare experiments?', ['Yes', 'No'])
+    if (compareChoice === 0) {
+      const idA = await prompt(`First experiment ID [${experiments[1]?.id}]:`)
+      const idB = await prompt(`Second experiment ID [${experiments[0]?.id}]:`)
+      const a = parseInt(idA) || experiments[1]?.id
+      const b = parseInt(idB) || experiments[0]?.id
+
+      try {
+        const cmp = compareExperiments(a, b)
+        info(`\nComparing #${a} vs #${b}:`)
+        const delta = cmp.diff.accuracyDelta
+        if (delta > 0) success(`Accuracy: +${(delta * 100).toFixed(2)}pp improvement`)
+        else if (delta < 0) warn(`Accuracy: ${(delta * 100).toFixed(2)}pp regression`)
+        else info('Accuracy: unchanged')
+
+        if (cmp.diff.changes.length) {
+          info('Changes:')
+          for (const c of cmp.diff.changes) dim(`  • ${c}`)
+        }
+      } catch (e) {
+        error(e.message)
+      }
+    }
+  }
+}
+
 async function taskMenu(task) {
   while (true) {
     const action = await menu(`Task: ${task.name}`, [
-      'Run full pipeline',
-      'Preview (sample generation)',
-      'Generate synthetic data',
-      'Prepare data (dedupe + merge + split)',
-      'Augment data',
-      'Confidence filter',
-      'Train model',
-      'Compare algorithms',
-      'Hyperparameter search',
-      'Predict (interactive)',
-      'Uncertainty sampling (active learning)',
-      'Active learning history',
-      'Evaluation report',
-      'Model versions',
-      'Bundle for deployment',
-      '← Back'
+      'Run full pipeline',                          // 0
+      'Preview (sample generation)',                 // 1
+      'Generate synthetic data',                     // 2
+      'Prepare data (dedupe + merge + split)',        // 3
+      'Semantic dedup (embedding-based)',             // 4
+      'Augment data',                                // 5
+      'Confidence filter',                           // 6
+      'LLM-as-judge quality scoring',                // 7
+      'Contrastive example generation',              // 8
+      'Cross-provider ensemble generation',          // 9
+      'Curriculum analysis',                         // 10
+      'Train model (TF-IDF)',                        // 11
+      'Train model (embeddings)',                    // 12
+      'Train ensemble (all algorithms)',             // 13
+      'Compare algorithms',                          // 14
+      'Hyperparameter search',                       // 15
+      'K-fold cross-validation',                     // 16
+      'Predict (interactive)',                       // 17
+      'Predict (confidence threshold)',              // 18
+      'Predict (ensemble)',                          // 19
+      'Zero-shot eval (LLM baseline)',               // 20
+      'Uncertainty sampling (active learning)',       // 21
+      'Active learning history',                     // 22
+      'Evaluation report',                           // 23
+      'Feature importance',                          // 24
+      'Error taxonomy',                              // 25
+      'Calibration analysis',                        // 26
+      'Experiment history',                          // 27
+      'Model versions',                              // 28
+      'Bundle for deployment',                       // 29
+      'Embedding cache stats',                       // 30
+      '← Back'                                       // 31
     ])
 
     if (action === 0) await runFullPipeline(task)
     else if (action === 1) await runPreview(task)
     else if (action === 2) await runGenerate(task)
     else if (action === 3) await runPrepare(task)
-    else if (action === 4) await runAugment(task)
-    else if (action === 5) await runConfidenceFilter(task)
-    else if (action === 6) {
+    else if (action === 4) await runSemanticDedup(task)
+    else if (action === 5) await runAugment(task)
+    else if (action === 6) await runConfidenceFilter(task)
+    else if (action === 7) await runLLMJudge(task)
+    else if (action === 8) await runContrastive(task)
+    else if (action === 9) await runEnsembleGenerate(task)
+    else if (action === 10) await runCurriculumAnalysis(task)
+    else if (action === 11) {
       const splitResult = await runPrepare(task)
       if (splitResult) await runTrain(task, splitResult)
     }
-    else if (action === 7) await runCompare(task)
-    else if (action === 8) await runHyperparamSearch(task)
-    else if (action === 9) await runPredict(task)
-    else if (action === 10) await runUncertaintySampling(task)
-    else if (action === 11) await runActiveLearningHistory(task)
-    else if (action === 12) await runReport(task)
-    else if (action === 13) await runModelVersions(task)
-    else if (action === 14) await runBundle(task)
+    else if (action === 12) await runEmbedTrain(task)
+    else if (action === 13) await runTrainEnsemble(task)
+    else if (action === 14) await runCompare(task)
+    else if (action === 15) await runHyperparamSearch(task)
+    else if (action === 16) await runKFoldCV(task)
+    else if (action === 17) await runPredict(task)
+    else if (action === 18) await runThresholdPredict(task)
+    else if (action === 19) await runEnsemblePredict(task)
+    else if (action === 20) await runZeroShot(task)
+    else if (action === 21) await runUncertaintySampling(task)
+    else if (action === 22) await runActiveLearningHistory(task)
+    else if (action === 23) await runReport(task)
+    else if (action === 24) await runFeatureImportance(task)
+    else if (action === 25) await runErrorTaxonomy(task)
+    else if (action === 26) await runCalibration(task)
+    else if (action === 27) await runExperimentHistory(task)
+    else if (action === 28) await runModelVersions(task)
+    else if (action === 29) await runBundle(task)
+    else if (action === 30) await runEmbedCacheStats()
     else return
   }
 }

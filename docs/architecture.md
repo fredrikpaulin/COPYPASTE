@@ -20,13 +20,20 @@ index.js
   ├── lib/infer.js       Inference via Python subprocess (process I/O)
   ├── lib/bundle.js      Standalone model packaging (file I/O)
   ├── lib/active.js      Active learning / uncertainty sampling (process + network I/O)
+  ├── lib/embed.js       Multi-provider embedding abstraction (network I/O)
+  ├── lib/embed-cache.js SQLite embedding cache (file I/O)
+  ├── lib/curriculum.js  Curriculum learning + data strategy (process + network I/O)
+  ├── lib/multitask.js   Multi-task / transfer learning (process + network I/O)
+  ├── lib/evaluate.js    Evaluation + interpretability (process I/O + pure logic)
+  ├── lib/ensemble.js    Ensemble inference + confidence threshold (process I/O)
+  ├── lib/experiment.js  Experiment tracking via SQLite (file I/O)
   ├── lib/templates.js   Pre-built task template loading (file I/O)
   ├── lib/report.js      HTML evaluation report generation (file I/O)
   ├── lib/config.js      Config file loading + defaults (file I/O)
   └── lib/log.js         Structured JSONL logging (file I/O)
 ```
 
-`lib/generate.js` imports from `lib/provider.js` for multi-provider support. All other modules export functions consumed by `index.js`, which acts as the composition root.
+`lib/generate.js` imports from `lib/provider.js` for multi-provider support. `lib/embed-cache.js` imports from `lib/embed.js` for cached embedding. `lib/data.js` imports from `lib/embed.js` for semantic deduplication. `lib/curriculum.js` imports from `lib/infer.js` (difficulty scoring), `lib/provider.js` (LLM-as-judge, contrastive), and `lib/generate.js` (ensemble). `lib/multitask.js` imports from `lib/provider.js` (zero-shot eval) and `lib/generate.js` (progressive distillation). `lib/evaluate.js` is mostly self-contained — k-fold CV shells out to Python, feature importance runs an inline Python script, and the pure-JS functions (error taxonomy, calibration, PCA projection) have no imports. All modules export functions consumed by `index.js`, which acts as the composition root.
 
 ## Data flow
 
@@ -136,6 +143,48 @@ Exports: `bundle(taskName, outputDir)`.
 Active learning via uncertainty sampling. Runs predictions through the trained model, ranks by confidence (ascending), and surfaces the most uncertain examples for labeling. Supports LLM-in-the-loop labeling (send uncertain examples to Claude), iteration history tracking, and integration with the training data pipeline.
 
 Exports: `getUncertainExamples(taskName, texts, { topK })`, `generateAndRankByUncertainty(task, opts)`, `llmLabel(examples, task, { apiKey, model })`, `loadHistory(taskName)`, `saveIteration(taskName, iteration)`.
+
+## lib/embed.js
+
+Multi-provider embedding abstraction supporting OpenAI (`text-embedding-3-small`) and Ollama (`nomic-embed-text`). Each provider has its own fetch implementation matching the provider's embedding API format. Includes `cosineSimilarity()` for vector comparison, used by semantic deduplication. Batch embedding with configurable chunk size and progress callbacks.
+
+Exports: `embed(providerName, texts, opts)`, `cosineSimilarity(a, b)`, `resolveEmbedProvider(task, config)`, `listEmbedProviders()`, `EMBEDDING_PROVIDERS`.
+
+## lib/embed-cache.js
+
+SQLite-backed embedding cache using `bun:sqlite`. Stores embeddings as packed Float32Array buffers keyed by (text_hash, model). Avoids re-embedding the same text when re-training or experimenting. `cachedEmbed()` wraps the embed function — looks up cached vectors first, only calls the API for misses, stores new results.
+
+Exports: `createEmbedCache(cachePath)`, `cachedEmbed(providerName, texts, opts)`, `hashText(text)`, `packEmbedding(arr)`, `unpackEmbedding(buf)`.
+
+## lib/curriculum.js
+
+Curriculum learning and data strategy. `scoreDifficulty()` runs a trained model over the dataset and uses `1 - confidence` as a difficulty proxy. `sortByCurriculum()` orders data easy-first for staged training. `curriculumStages()` splits into easy/medium/hard buckets. `llmJudge()` scores examples on a relevance/naturalness/label-correctness rubric via `callProvider`. `filterByQuality()` removes low-scoring examples. `generateContrastive()` produces hard negatives near decision boundaries between label pairs. `ensembleGenerate()` generates data from multiple providers and tags `_provider` provenance.
+
+Exports: `scoreDifficulty(taskName, data)`, `sortByCurriculum(scoredData)`, `curriculumStages(scoredData, opts)`, `llmJudge(data, task, opts)`, `filterByQuality(scoredData, threshold)`, `generateContrastive(task, opts)`, `ensembleGenerate(task, providers, opts)`.
+
+## lib/multitask.js
+
+Multi-task and transfer learning. `sharedFeatureTraining()` collects training texts across multiple tasks for a shared TF-IDF vocabulary. `zeroShotEval()` evaluates the LLM directly on validation data as a baseline — no training needed — to establish how much distillation helps. `progressiveDistill()` chains a large provider → local Ollama model, tagging provenance at each stage for downstream analysis.
+
+Exports: `sharedFeatureTraining(tasks, opts)`, `zeroShotEval(task, valData, opts)`, `progressiveDistill(task, opts)`.
+
+## lib/evaluate.js
+
+Evaluation and interpretability. `kFoldSplit()` creates k disjoint validation folds with Fisher-Yates shuffle. `kFoldCV()` runs training/evaluation for each fold via the Python subprocess and reports mean ± std accuracy. `featureImportance()` runs an inline Python script to extract top TF-IDF coefficients per label (or random forest importances). `errorTaxonomy()` categorizes misclassifications by confusion pair, text length, and data source. `calibrationBins()` computes reliability bins and Expected Calibration Error (ECE). `projectTo2D()` uses power iteration PCA in pure JS to project embeddings onto two principal components for data map visualization.
+
+Exports: `kFoldSplit(n, k)`, `kFoldCV(task, data, opts)`, `featureImportance(taskName, opts)`, `errorTaxonomy(valData, predictions)`, `calibrationBins(predictions, actual, opts)`, `projectTo2D(embeddings)`.
+
+## lib/ensemble.js
+
+Ensemble inference combining predictions from multiple trained algorithms. `trainEnsembleModels()` trains all three algorithms (logistic regression, SVM, random forest) and stores them in `models/<task>/ensemble/<algorithm>/`. `ensemblePredict()` runs all ensemble models and combines via weighted majority vote — weights are each model's validation accuracy. Returns confidence (weighted vote share), agreement ratio (fraction of models agreeing), and optional rejection when confidence falls below a threshold. `predictWithThreshold()` wraps the primary model's prediction with a rejection mechanism for low-confidence outputs.
+
+Exports: `trainEnsembleModels(task, trainPath, valPath, opts)`, `listEnsembleModels(taskName)`, `ensemblePredict(taskName, texts, opts)`, `predictWithThreshold(taskName, texts, opts)`, `ALGORITHMS`.
+
+## lib/experiment.js
+
+SQLite-backed experiment tracking using `bun:sqlite`. Every training run is automatically recorded with task name, algorithm, accuracy, train/val size, data fingerprint, feature mode, dimensionality reduction settings, hyperparameters (JSON), duration, and labels. `hashDataset()` computes a fast FNV-1a fingerprint over all texts and labels for data versioning. `compareExperiments()` diffs two runs showing accuracy delta, what changed (algorithm, data, features, hyperparams), and whether they used the same dataset. `bestExperiment()` returns the highest-accuracy run for a task. `experimentStats()` returns aggregate metrics across all runs.
+
+Exports: `recordExperiment(entry)`, `listExperiments(taskName, opts)`, `getExperiment(id)`, `compareExperiments(idA, idB)`, `bestExperiment(taskName)`, `clearExperiments(taskName)`, `experimentStats(taskName)`, `hashDataset(rows)`, `openDb()`.
 
 ## lib/config.js
 

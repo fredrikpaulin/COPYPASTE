@@ -45,11 +45,18 @@ lib/
   task.js               Task loading, validation, defaults
   provider.js           Multi-provider LLM abstraction (Claude, OpenAI, Ollama)
   generate.js           LLM data generation + retry/backoff
-  data.js               JSONL I/O, merge, split, dedup, augment
+  data.js               JSONL I/O, merge, split, dedup, augment, semantic dedup
   train.js              Python subprocess + model versioning
   infer.js              Inference via Python subprocess
   bundle.js             Standalone model packaging
   active.js             Active learning / uncertainty sampling
+  embed.js              Multi-provider embedding abstraction (OpenAI, Ollama)
+  embed-cache.js        SQLite embedding cache (bun:sqlite)
+  curriculum.js         Curriculum learning, LLM-as-judge, contrastive generation
+  multitask.js          Shared features, zero-shot eval, progressive distillation
+  evaluate.js           K-fold CV, feature importance, error taxonomy, calibration
+  ensemble.js           Ensemble inference, weighted majority vote, rejection
+  experiment.js         Experiment tracking via SQLite (data hash, accuracy, hyperparams)
   templates.js          Pre-built task template loading
   report.js             HTML evaluation report generation
   config.js             Project config (distill.config.json)

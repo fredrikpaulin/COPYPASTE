@@ -22,18 +22,13 @@ def read_jsonl(path):
                 rows.append(json.loads(line))
     return rows
 
-def build_pipeline(algorithm='logistic_regression', params=None):
+def build_pipeline(algorithm='logistic_regression', params=None, use_embeddings=False):
     """Build a sklearn Pipeline with the given algorithm and optional params."""
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.linear_model import LogisticRegression
     from sklearn.svm import LinearSVC
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.pipeline import Pipeline
-
-    tfidf_params = {
-        'max_features': int((params or {}).get('max_features', 10000)),
-        'ngram_range': (1, 2)
-    }
 
     if algorithm == 'logistic_regression':
         clf = LogisticRegression(
@@ -54,10 +49,42 @@ def build_pipeline(algorithm='logistic_regression', params=None):
     else:
         raise ValueError(f"Unknown algorithm: {algorithm}")
 
+    if use_embeddings:
+        # No vectorizer — features are pre-computed embedding vectors
+        return Pipeline([('clf', clf)])
+
+    tfidf_params = {
+        'max_features': int((params or {}).get('max_features', 10000)),
+        'ngram_range': (1, 2)
+    }
+
     return Pipeline([
         ('tfidf', TfidfVectorizer(**tfidf_params)),
         ('clf', clf)
     ])
+
+
+def load_embeddings(path):
+    """Load pre-computed embeddings from a JSONL file. Each row: {"embedding": [...]}"""
+    import numpy as np
+    rows = read_jsonl(path)
+    return np.array([r['embedding'] for r in rows])
+
+
+def reduce_dimensions(X, method='pca', n_components=50):
+    """Reduce embedding dimensions via PCA or truncated SVD."""
+    if method == 'pca':
+        from sklearn.decomposition import PCA
+        n = min(n_components, X.shape[0], X.shape[1])
+        reducer = PCA(n_components=n)
+    else:
+        from sklearn.decomposition import TruncatedSVD
+        n = min(n_components, X.shape[1] - 1)
+        reducer = TruncatedSVD(n_components=n)
+
+    print(f"Reducing dimensions: {X.shape[1]} -> {n} ({method})")
+    sys.stdout.flush()
+    return reducer.fit_transform(X), reducer
 
 def evaluate_model(pipeline, X_val, y_val):
     """Evaluate and return accuracy + per-label report."""
@@ -67,19 +94,36 @@ def evaluate_model(pipeline, X_val, y_val):
     report = classification_report(y_val, y_pred, zero_division=0)
     return acc, y_pred, report
 
-def train_classifier(train_data, val_data, labels, output_dir, export_onnx=False, algorithm='logistic_regression', params=None):
-    X_train = [r['text'] for r in train_data]
+def train_classifier(train_data, val_data, labels, output_dir, export_onnx=False, algorithm='logistic_regression', params=None,
+                     train_embeddings=None, val_embeddings=None, dim_reduce=None, n_components=50):
     y_train = [r['label'] for r in train_data]
-    X_val = [r['text'] for r in val_data]
     y_val = [r['label'] for r in val_data]
+
+    use_embeddings = train_embeddings is not None
+    if use_embeddings:
+        import numpy as np
+        X_train = train_embeddings
+        X_val = val_embeddings
+        feature_mode = 'embeddings'
+
+        # Optional dimensionality reduction
+        reducer = None
+        if dim_reduce:
+            X_train, reducer = reduce_dimensions(X_train, method=dim_reduce, n_components=n_components)
+            X_val = reducer.transform(X_val)
+    else:
+        X_train = [r['text'] for r in train_data]
+        X_val = [r['text'] for r in val_data]
+        feature_mode = 'tfidf'
 
     print(f"Training samples: {len(X_train)}")
     print(f"Validation samples: {len(X_val)}")
     print(f"Labels: {labels}")
     print(f"Algorithm: {algorithm}")
+    print(f"Features: {feature_mode}")
     sys.stdout.flush()
 
-    pipeline = build_pipeline(algorithm, params)
+    pipeline = build_pipeline(algorithm, params, use_embeddings=use_embeddings)
 
     print("Training...")
     sys.stdout.flush()
@@ -93,20 +137,29 @@ def train_classifier(train_data, val_data, labels, output_dir, export_onnx=False
 
     os.makedirs(output_dir, exist_ok=True)
     model_path = os.path.join(output_dir, 'model.pkl')
+
+    # For embedding models, save the reducer alongside the pipeline
+    model_artifact = pipeline
+    if use_embeddings and dim_reduce and reducer is not None:
+        model_artifact = {'pipeline': pipeline, 'reducer': reducer, 'feature_mode': 'embeddings'}
     with open(model_path, 'wb') as f:
-        pickle.dump(pipeline, f)
+        pickle.dump(model_artifact, f)
 
     meta = {
         'task_type': 'classification',
         'algorithm': algorithm,
+        'feature_mode': feature_mode,
         'labels': labels,
         'accuracy': acc,
-        'train_size': len(X_train),
-        'val_size': len(X_val),
+        'train_size': len(y_train),
+        'val_size': len(y_val),
         'created_at': datetime.utcnow().isoformat() + 'Z'
     }
     if params:
         meta['params'] = params
+    if dim_reduce:
+        meta['dim_reduce'] = dim_reduce
+        meta['n_components'] = n_components
 
     # ONNX export
     if export_onnx:
@@ -375,6 +428,11 @@ def main():
     parser.add_argument('--compare', action='store_true', help='Compare multiple algorithms')
     parser.add_argument('--search', action='store_true', help='Hyperparameter grid search')
     parser.add_argument('--grid', help='JSON string of hyperparameter grid')
+    # Embedding mode
+    parser.add_argument('--train-embeddings', help='Path to training embeddings JSONL')
+    parser.add_argument('--val-embeddings', help='Path to validation embeddings JSONL')
+    parser.add_argument('--dim-reduce', choices=['pca', 'svd'], help='Dimensionality reduction method')
+    parser.add_argument('--n-components', type=int, default=50, help='Target dimensions after reduction')
     # Predict mode
     parser.add_argument('--predict', help='Path to model.pkl for prediction')
     parser.add_argument('--input', help='Text to predict (or - for stdin JSONL)')
@@ -400,6 +458,13 @@ def main():
     if args.task_type == 'classification':
         labels = args.labels.split(',') if args.labels else list(set(r['label'] for r in train_data))
 
+        # Load pre-computed embeddings if provided
+        train_emb = None
+        val_emb = None
+        if args.train_embeddings and args.val_embeddings:
+            train_emb = load_embeddings(args.train_embeddings)
+            val_emb = load_embeddings(args.val_embeddings)
+
         if args.compare:
             compare_classifiers(train_data, val_data, labels, args.output)
         elif args.search:
@@ -419,7 +484,9 @@ def main():
                 else:
                     i += 1
             train_classifier(train_data, val_data, labels, args.output,
-                           export_onnx=args.onnx, algorithm=args.algorithm, params=params or None)
+                           export_onnx=args.onnx, algorithm=args.algorithm, params=params or None,
+                           train_embeddings=train_emb, val_embeddings=val_emb,
+                           dim_reduce=args.dim_reduce, n_components=args.n_components)
     elif args.task_type == 'extraction':
         fields = args.fields.split(',') if args.fields else []
         if not fields:
