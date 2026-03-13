@@ -1,6 +1,6 @@
 # Roadmap
 
-Current status: **v0.1.7 — phases 1–11 complete.** All planned phases are implemented: foundation, production hardening, data quality, model capabilities, deployment, active learning, multi-provider extensibility, embedding-based models, curriculum learning, transfer learning, interpretability, ensemble inference, and experiment tracking.
+Current status: **v0.1.8 — phases 1–12 complete.** All planned phases are implemented: foundation, production hardening, data quality, model capabilities, deployment, active learning, multi-provider extensibility, embedding-based models, curriculum learning, transfer learning, interpretability, ensemble inference, experiment tracking, and transformer distillation.
 
 ---
 
@@ -202,3 +202,24 @@ Add a rejection mechanism: predictions below a configurable confidence threshold
 
 ### Experiment tracking
 Log every training run in a SQLite database with: task, algorithm, accuracy, data fingerprint, feature mode, hyperparameters, duration. Compare experiments side by side — see what changed between two runs and whether accuracy improved. Query best-ever experiment per task.
+
+---
+
+## Phase 12 — Transformer distillation ✅
+
+Fine-tune pretrained transformer models as an alternative to classical scikit-learn pipelines.
+
+### Model presets
+Five built-in presets — DistilBERT (66M), TinyBERT (14M), BERT-base (110M), RoBERTa (125M), MiniLM (33M) — plus support for any custom HuggingFace model name. Each preset has tuned defaults for learning rate, epochs, and sequence length.
+
+### GPU support
+Automatic device detection: CUDA (NVIDIA GPUs), MPS (Apple Silicon), or CPU fallback. FP16 mixed precision enabled on CUDA for faster training. Device info displayed in the TUI before training starts.
+
+### Runtime dependencies
+PyTorch and HuggingFace Transformers are optional — checked at runtime with clear install instructions if missing. scikit-learn remains the default backend; transformers are an upgrade path for when you need more capability.
+
+### Training and evaluation
+HuggingFace Trainer with per-epoch evaluation, structured JSON output for TUI progress tracking, and automatic experiment recording. ONNX export via `optimum` (preferred) or `torch.onnx` fallback.
+
+### Prediction
+Load fine-tuned transformer models for inference with softmax confidence scores. Same interface as classical prediction for consistency.

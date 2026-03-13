@@ -35,6 +35,7 @@ Use arrow keys to navigate, Enter to select, Ctrl-C to quit.
 - [Bun](https://bun.sh) (tested with v1.3+)
 - Python 3.8+ with scikit-learn (`pip install scikit-learn`)
 - At least one LLM provider configured: Anthropic API key (`ANTHROPIC_API_KEY`), OpenAI API key (`OPENAI_API_KEY`), or a running Ollama instance
+- _Optional:_ PyTorch + HuggingFace Transformers for transformer fine-tuning (`pip install torch transformers`)
 
 ## Project layout
 
@@ -57,6 +58,7 @@ lib/
   evaluate.js           K-fold CV, feature importance, error taxonomy, calibration
   ensemble.js           Ensemble inference, weighted majority vote, rejection
   experiment.js         Experiment tracking via SQLite (data hash, accuracy, hyperparams)
+  transformer.js        Transformer fine-tuning orchestration (DistilBERT, TinyBERT, etc.)
   templates.js          Pre-built task template loading
   report.js             HTML evaluation report generation
   config.js             Project config (distill.config.json)
@@ -68,6 +70,7 @@ tasks/                  Your task definition files (*.json)
 data/                   Generated and prepared datasets (*.jsonl)
 scripts/
   train.py              scikit-learn training + ONNX export + inference
+  train_transformer.py  Transformer fine-tuning (DistilBERT, TinyBERT, BERT, RoBERTa, MiniLM)
 models/                 Trained model output (created at runtime)
 reports/                HTML evaluation reports (created at runtime)
 logs/                   Structured run logs (created at runtime)

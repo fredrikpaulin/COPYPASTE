@@ -27,13 +27,14 @@ index.js
   ├── lib/evaluate.js    Evaluation + interpretability (process I/O + pure logic)
   ├── lib/ensemble.js    Ensemble inference + confidence threshold (process I/O)
   ├── lib/experiment.js  Experiment tracking via SQLite (file I/O)
+  ├── lib/transformer.js Transformer fine-tuning orchestration (process I/O)
   ├── lib/templates.js   Pre-built task template loading (file I/O)
   ├── lib/report.js      HTML evaluation report generation (file I/O)
   ├── lib/config.js      Config file loading + defaults (file I/O)
   └── lib/log.js         Structured JSONL logging (file I/O)
 ```
 
-`lib/generate.js` imports from `lib/provider.js` for multi-provider support. `lib/embed-cache.js` imports from `lib/embed.js` for cached embedding. `lib/data.js` imports from `lib/embed.js` for semantic deduplication. `lib/curriculum.js` imports from `lib/infer.js` (difficulty scoring), `lib/provider.js` (LLM-as-judge, contrastive), and `lib/generate.js` (ensemble). `lib/multitask.js` imports from `lib/provider.js` (zero-shot eval) and `lib/generate.js` (progressive distillation). `lib/evaluate.js` is mostly self-contained — k-fold CV shells out to Python, feature importance runs an inline Python script, and the pure-JS functions (error taxonomy, calibration, PCA projection) have no imports. All modules export functions consumed by `index.js`, which acts as the composition root.
+`lib/generate.js` imports from `lib/provider.js` for multi-provider support. `lib/embed-cache.js` imports from `lib/embed.js` for cached embedding. `lib/data.js` imports from `lib/embed.js` for semantic deduplication. `lib/curriculum.js` imports from `lib/infer.js` (difficulty scoring), `lib/provider.js` (LLM-as-judge, contrastive), and `lib/generate.js` (ensemble). `lib/multitask.js` imports from `lib/provider.js` (zero-shot eval) and `lib/generate.js` (progressive distillation). `lib/evaluate.js` is mostly self-contained — k-fold CV shells out to Python, feature importance runs an inline Python script, and the pure-JS functions (error taxonomy, calibration, PCA projection) have no imports. `lib/transformer.js` orchestrates `scripts/train_transformer.py` via subprocess — handles dependency detection, device discovery, model presets, and structured output parsing. All modules export functions consumed by `index.js`, which acts as the composition root.
 
 ## Data flow
 
