@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.9
+
+### Streaming generation (Phase 13)
+
+- Stream tokens from all three LLM providers as they arrive — see generation output in real-time
+- Anthropic SSE streaming — parse `content_block_delta` events for Claude responses
+- OpenAI SSE streaming — parse `choices[0].delta.content` from streaming completions
+- Ollama NDJSON streaming — parse newline-delimited JSON from local Ollama models
+- `streamProvider()` — unified streaming interface with `onToken(token, fullText)` callback, retry logic, and error handling matching `callProvider()`
+- SSE and NDJSON parsers handle chunked delivery, partial lines, and `[DONE]` sentinel
+- `streamBox()` TUI component — renders streaming tokens with automatic line wrapping
+- `generate()` and `preview()` accept `stream: true` + `onToken` callback
+- Per-batch stream labels — shows "Batch 2/5" header when streaming multi-batch generation
+- Two new menu items: "Preview (streaming)" and "Generate (streaming)"
+- Task menu expanded to 37 items (indices 0-36)
+
+### Tests
+
+- New `test/phase13.test.js` — SSE parsing (5), NDJSON parsing (3), token extractors (8), streamProvider with mock servers (6), streamBox (3), generate streaming (2), export consistency (3)
+- 294 tests passing across 17 files
+
 ## 0.1.8
 
 ### Transformer distillation (Phase 12)

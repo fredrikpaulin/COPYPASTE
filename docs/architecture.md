@@ -93,6 +93,7 @@ Renders everything using ANSI escape codes written directly to `process.stdout`.
 - `progress(current, total, label)` — overwriting progress bar
 - `spinner(label)` — animated spinner with `.stop()` and `.fail()`
 - `table(rows, headers)` — bordered ASCII table
+- `streamBox(label)` — streaming token display with line wrapping, `.write(token)`, `.end(summary)`, `.chars()`
 - `banner()`, `header()`, `success()`, `warn()`, `error()`, `info()`, `dim()` — styled output
 
 The TUI uses raw mode for menus (to capture arrow keys) and cooked mode for text prompts.
@@ -107,13 +108,17 @@ Exports: `loadTask(name)`, `listTasks()`, `saveTask(task)`, `validate(data, sche
 
 Multi-provider LLM abstraction supporting Anthropic (Claude), OpenAI, and Ollama. Each provider has its own fetch implementation matching the provider's API format. The unified `callProvider()` function handles retries with exponential backoff and jitter on retryable errors (429, 529, 5xx). `resolveProvider()` merges task config, project config, and environment variables to select the right provider, model, and API key. `listProviders()` enumerates all providers and whether they're configured (have the required API key in env).
 
-Exports: `callProvider(providerName, opts)`, `resolveProvider(task, config)`, `listProviders()`, `PROVIDERS`, `backoffMs(attempt, base, max)`.
+Also provides `streamProvider()` — the streaming counterpart to `callProvider()`. Streams tokens via `onToken(token, fullTextSoFar)` callback. Uses SSE parsing for Anthropic/OpenAI and NDJSON parsing for Ollama. Same retry logic and error handling as batch mode. Parser functions (`parseSSE`, `parseNDJSON`) and token extractors (`extractAnthropicToken`, `extractOpenAIToken`, `extractOllamaToken`) are exported for testing and reuse.
+
+Exports: `callProvider(providerName, opts)`, `streamProvider(providerName, opts)`, `resolveProvider(task, config)`, `listProviders()`, `PROVIDERS`, `backoffMs(attempt, base, max)`, `parseSSE(reader)`, `parseNDJSON(reader)`, `extractAnthropicToken(data)`, `extractOpenAIToken(data)`, `extractOllamaToken(data)`.
 
 ## lib/generate.js
 
 Generates synthetic training data via LLM API calls. Uses `lib/provider.js` for multi-provider support — routes to the correct provider based on task config. Builds task-appropriate system and user prompts, sends sequential batch requests, parses JSON arrays from responses, validates each example against the task definition, drops malformed rows, and writes accumulated results to JSONL.
 
-Exports: `generate(task, { apiKey, onProgress, onRetry, onDropped, provider })`, `preview(task, { apiKey, count, onRetry, provider })`, `buildSystemPrompt(task)`, `buildBatchPrompt(task, batchSize)`, `parseBatchResponse(text)`, `validateExample(example, task)`, `backoffMs(attempt, base, max)`.
+Both `generate()` and `preview()` accept `stream: true` and `onToken` callback — when enabled, they use `streamProvider()` instead of `callProvider()`, yielding tokens as they arrive. The `onToken` callback in `generate()` also receives batch info `{ batch, batches }` for multi-batch progress display.
+
+Exports: `generate(task, { apiKey, onProgress, onRetry, onDropped, onToken, stream, provider })`, `preview(task, { apiKey, count, onRetry, onToken, stream, provider })`, `buildSystemPrompt(task)`, `buildBatchPrompt(task, batchSize)`, `parseBatchResponse(text)`, `validateExample(example, task)`, `backoffMs(attempt, base, max)`.
 
 ## lib/data.js
 

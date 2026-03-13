@@ -1,6 +1,6 @@
 # Roadmap
 
-Current status: **v0.1.8 — phases 1–12 complete.** All planned phases are implemented: foundation, production hardening, data quality, model capabilities, deployment, active learning, multi-provider extensibility, embedding-based models, curriculum learning, transfer learning, interpretability, ensemble inference, experiment tracking, and transformer distillation.
+Current status: **v0.1.9 — phases 1–13 complete.** All planned phases are implemented: foundation, production hardening, data quality, model capabilities, deployment, active learning, multi-provider extensibility, embedding-based models, curriculum learning, transfer learning, interpretability, ensemble inference, experiment tracking, transformer distillation, and streaming generation.
 
 ---
 
@@ -223,3 +223,21 @@ HuggingFace Trainer with per-epoch evaluation, structured JSON output for TUI pr
 
 ### Prediction
 Load fine-tuned transformer models for inference with softmax confidence scores. Same interface as classical prediction for consistency.
+
+---
+
+## Phase 13 — Streaming generation ✅
+
+Stream LLM responses token-by-token for better UX during data generation.
+
+### Provider-specific stream parsing
+SSE (Server-Sent Events) parsing for Anthropic and OpenAI, NDJSON (newline-delimited JSON) for Ollama. Handles chunked delivery, partial lines across network boundaries, and provider-specific event formats.
+
+### Unified streaming interface
+`streamProvider()` mirrors `callProvider()` but yields tokens via `onToken(token, fullTextSoFar)` callback. Same retry logic (429/529/5xx with exponential backoff), same error handling, same provider resolution.
+
+### TUI stream display
+`streamBox()` component renders tokens as they arrive with automatic line wrapping, character counting, and per-batch headers. The existing progress bar still shows after each batch completes.
+
+### Backward compatible
+Streaming is opt-in via `stream: true` — existing batch-mode code paths are unchanged. Both `generate()` and `preview()` accept the new option.

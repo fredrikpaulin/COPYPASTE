@@ -1,6 +1,6 @@
 import {
   clear, banner, header, success, warn, error, info, dim,
-  progress, spinner, prompt, menu, table, SHOW_CURSOR
+  progress, spinner, prompt, menu, table, streamBox, SHOW_CURSOR
 } from './lib/tui.js'
 import { loadTask, listTasks, saveTask } from './lib/task.js'
 import { generate, preview } from './lib/generate.js'
@@ -127,22 +127,33 @@ async function runReport(task) {
   info(`Open in browser: file://${result.path}`)
 }
 
-async function runPreview(task) {
+async function runPreview(task, useStream = false) {
   if (!API_KEY) { error('Set ANTHROPIC_API_KEY in your environment'); return }
   if (!task.synthetic) { warn('No synthetic config on this task'); return }
 
   header(`Preview for "${task.name}"`)
-  const sp = spinner('Generating sample...')
+  if (useStream) info('Streaming: enabled')
+
+  let box = null
+  const sp = useStream ? null : spinner('Generating sample...')
 
   try {
     const result = await preview(task, {
       apiKey: API_KEY,
       count: 5,
+      stream: useStream,
+      onToken: useStream ? (token) => {
+        if (!box) box = streamBox('Streaming preview')
+        box.write(token)
+      } : undefined,
       onRetry: ({ attempt, waitMs }) => {
-        sp.stop(`Retry ${attempt} in ${Math.round(waitMs / 1000)}s...`)
+        if (box) { box.end(); box = null }
+        if (sp) sp.stop(`Retry ${attempt} in ${Math.round(waitMs / 1000)}s...`)
+        else warn(`Retry ${attempt} in ${Math.round(waitMs / 1000)}s...`)
       }
     })
-    sp.stop(`${result.examples.length} examples generated`)
+    if (box) { box.end(); box = null }
+    if (sp) sp.stop(`${result.examples.length} examples generated`)
 
     for (const ex of result.examples) {
       info(JSON.stringify(ex))
@@ -151,27 +162,39 @@ async function runPreview(task) {
       warn(`${result.dropped} malformed examples dropped`)
     }
   } catch (e) {
-    sp.fail('Preview failed')
+    if (box) { box.end(); box = null }
+    if (sp) sp.fail('Preview failed')
     error(e.message)
   }
 }
 
-async function runGenerate(task) {
+async function runGenerate(task, useStream = false) {
   if (!API_KEY) { error('Set ANTHROPIC_API_KEY in your environment'); return }
   if (!task.synthetic) { warn('No synthetic config on this task'); return }
 
   await startLog(task.name)
-  logEntry('generate_start', { task: task.name, count: task.synthetic.count })
+  logEntry('generate_start', { task: task.name, count: task.synthetic.count, stream: useStream })
 
   header(`Generating synthetic data for "${task.name}"`)
   info(`Model: ${task.synthetic.model || 'claude-sonnet-4-20250514'}`)
   info(`Target: ${task.synthetic.count} examples in batches of ${task.synthetic.batchSize}`)
+  if (useStream) info('Streaming: enabled — tokens will appear as they arrive')
 
+  let box = null
   try {
     const result = await generate(task, {
       apiKey: API_KEY,
-      onProgress: (current, total) => progress(current, total, 'examples'),
+      stream: useStream,
+      onToken: useStream ? (token, full, { batch, batches }) => {
+        if (!box) box = streamBox(`Batch ${batch}/${batches}`)
+        box.write(token)
+      } : undefined,
+      onProgress: (current, total) => {
+        if (box) { box.end(); box = null }
+        progress(current, total, 'examples')
+      },
       onRetry: ({ attempt, waitMs, status }) => {
+        if (box) { box.end(); box = null }
         warn(`Rate limited (${status}), retry ${attempt} in ${Math.round(waitMs / 1000)}s...`)
         logEntry('retry', { attempt, waitMs, status })
       },
@@ -180,10 +203,12 @@ async function runGenerate(task) {
         logEntry('dropped', { count })
       }
     })
+    if (box) { box.end(); box = null }
     success(`Generated ${result.count} examples → ${result.path}`)
     if (result.dropped) dim(`  (${result.dropped} dropped)`)
     logEntry('generate_complete', { count: result.count, dropped: result.dropped })
   } catch (e) {
+    if (box) { box.end(); box = null }
     error(`Generation failed: ${e.message}`)
     logEntry('generate_error', { error: e.message })
   }
@@ -1269,78 +1294,82 @@ async function taskMenu(task) {
     const action = await menu(`Task: ${task.name}`, [
       'Run full pipeline',                          // 0
       'Preview (sample generation)',                 // 1
-      'Generate synthetic data',                     // 2
-      'Prepare data (dedupe + merge + split)',        // 3
-      'Semantic dedup (embedding-based)',             // 4
-      'Augment data',                                // 5
-      'Confidence filter',                           // 6
-      'LLM-as-judge quality scoring',                // 7
-      'Contrastive example generation',              // 8
-      'Cross-provider ensemble generation',          // 9
-      'Curriculum analysis',                         // 10
-      'Train model (TF-IDF)',                        // 11
-      'Train model (embeddings)',                    // 12
-      'Train ensemble (all algorithms)',             // 13
-      'Compare algorithms',                          // 14
-      'Hyperparameter search',                       // 15
-      'K-fold cross-validation',                     // 16
-      'Predict (interactive)',                       // 17
-      'Predict (confidence threshold)',              // 18
-      'Predict (ensemble)',                          // 19
-      'Zero-shot eval (LLM baseline)',               // 20
-      'Uncertainty sampling (active learning)',       // 21
-      'Active learning history',                     // 22
-      'Evaluation report',                           // 23
-      'Feature importance',                          // 24
-      'Error taxonomy',                              // 25
-      'Calibration analysis',                        // 26
-      'Experiment history',                          // 27
-      'Model versions',                              // 28
-      'Bundle for deployment',                       // 29
-      'Embedding cache stats',                       // 30
-      'Train transformer (fine-tune)',                 // 31
-      'Predict (transformer)',                         // 32
-      'Compare all models (experiment history)',        // 33
-      '← Back'                                         // 34
+      'Preview (streaming)',                         // 2
+      'Generate synthetic data',                     // 3
+      'Generate (streaming)',                        // 4
+      'Prepare data (dedupe + merge + split)',        // 5
+      'Semantic dedup (embedding-based)',             // 6
+      'Augment data',                                // 7
+      'Confidence filter',                           // 8
+      'LLM-as-judge quality scoring',                // 9
+      'Contrastive example generation',              // 10
+      'Cross-provider ensemble generation',          // 11
+      'Curriculum analysis',                         // 12
+      'Train model (TF-IDF)',                        // 13
+      'Train model (embeddings)',                    // 14
+      'Train ensemble (all algorithms)',             // 15
+      'Compare algorithms',                          // 16
+      'Hyperparameter search',                       // 17
+      'K-fold cross-validation',                     // 18
+      'Predict (interactive)',                       // 19
+      'Predict (confidence threshold)',              // 20
+      'Predict (ensemble)',                          // 21
+      'Zero-shot eval (LLM baseline)',               // 22
+      'Uncertainty sampling (active learning)',       // 23
+      'Active learning history',                     // 24
+      'Evaluation report',                           // 25
+      'Feature importance',                          // 26
+      'Error taxonomy',                              // 27
+      'Calibration analysis',                        // 28
+      'Experiment history',                          // 29
+      'Model versions',                              // 30
+      'Bundle for deployment',                       // 31
+      'Embedding cache stats',                       // 32
+      'Train transformer (fine-tune)',                 // 33
+      'Predict (transformer)',                         // 34
+      'Compare all models (experiment history)',        // 35
+      '← Back'                                         // 36
     ])
 
     if (action === 0) await runFullPipeline(task)
     else if (action === 1) await runPreview(task)
-    else if (action === 2) await runGenerate(task)
-    else if (action === 3) await runPrepare(task)
-    else if (action === 4) await runSemanticDedup(task)
-    else if (action === 5) await runAugment(task)
-    else if (action === 6) await runConfidenceFilter(task)
-    else if (action === 7) await runLLMJudge(task)
-    else if (action === 8) await runContrastive(task)
-    else if (action === 9) await runEnsembleGenerate(task)
-    else if (action === 10) await runCurriculumAnalysis(task)
-    else if (action === 11) {
+    else if (action === 2) await runPreview(task, true)
+    else if (action === 3) await runGenerate(task)
+    else if (action === 4) await runGenerate(task, true)
+    else if (action === 5) await runPrepare(task)
+    else if (action === 6) await runSemanticDedup(task)
+    else if (action === 7) await runAugment(task)
+    else if (action === 8) await runConfidenceFilter(task)
+    else if (action === 9) await runLLMJudge(task)
+    else if (action === 10) await runContrastive(task)
+    else if (action === 11) await runEnsembleGenerate(task)
+    else if (action === 12) await runCurriculumAnalysis(task)
+    else if (action === 13) {
       const splitResult = await runPrepare(task)
       if (splitResult) await runTrain(task, splitResult)
     }
-    else if (action === 12) await runEmbedTrain(task)
-    else if (action === 13) await runTrainEnsemble(task)
-    else if (action === 14) await runCompare(task)
-    else if (action === 15) await runHyperparamSearch(task)
-    else if (action === 16) await runKFoldCV(task)
-    else if (action === 17) await runPredict(task)
-    else if (action === 18) await runThresholdPredict(task)
-    else if (action === 19) await runEnsemblePredict(task)
-    else if (action === 20) await runZeroShot(task)
-    else if (action === 21) await runUncertaintySampling(task)
-    else if (action === 22) await runActiveLearningHistory(task)
-    else if (action === 23) await runReport(task)
-    else if (action === 24) await runFeatureImportance(task)
-    else if (action === 25) await runErrorTaxonomy(task)
-    else if (action === 26) await runCalibration(task)
-    else if (action === 27) await runExperimentHistory(task)
-    else if (action === 28) await runModelVersions(task)
-    else if (action === 29) await runBundle(task)
-    else if (action === 30) await runEmbedCacheStats()
-    else if (action === 31) await runTransformerTrain(task)
-    else if (action === 32) await runTransformerPredict(task)
-    else if (action === 33) await runTransformerCompare(task)
+    else if (action === 14) await runEmbedTrain(task)
+    else if (action === 15) await runTrainEnsemble(task)
+    else if (action === 16) await runCompare(task)
+    else if (action === 17) await runHyperparamSearch(task)
+    else if (action === 18) await runKFoldCV(task)
+    else if (action === 19) await runPredict(task)
+    else if (action === 20) await runThresholdPredict(task)
+    else if (action === 21) await runEnsemblePredict(task)
+    else if (action === 22) await runZeroShot(task)
+    else if (action === 23) await runUncertaintySampling(task)
+    else if (action === 24) await runActiveLearningHistory(task)
+    else if (action === 25) await runReport(task)
+    else if (action === 26) await runFeatureImportance(task)
+    else if (action === 27) await runErrorTaxonomy(task)
+    else if (action === 28) await runCalibration(task)
+    else if (action === 29) await runExperimentHistory(task)
+    else if (action === 30) await runModelVersions(task)
+    else if (action === 31) await runBundle(task)
+    else if (action === 32) await runEmbedCacheStats()
+    else if (action === 33) await runTransformerTrain(task)
+    else if (action === 34) await runTransformerPredict(task)
+    else if (action === 35) await runTransformerCompare(task)
     else return
   }
 }
