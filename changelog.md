@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.1.10
+
+### CRF sequence labeling (Phase 14)
+
+- Pure JavaScript CRF engine — no Python dependency, no external libraries
+- Averaged structured perceptron training with configurable epochs and feature hashing
+- Feature extraction: word identity, shape, prefix/suffix, capitalization, digit, hyphen, bigrams, prev/next word context, previous tag
+- FNV-1a feature hashing to fixed-size weight vector — avoids unbounded feature dictionaries
+- Viterbi decoding for optimal tag sequence prediction
+- BIO tagging scheme: B-TYPE (begin), I-TYPE (inside), O (outside)
+- `labelsToBIO()` converts entity labels to full BIO tag set, `validateBIO()` checks well-formedness
+- Entity extraction from BIO tags with span tracking
+- Entity-level evaluation: per-type precision/recall/F1, micro-averaged F1, token accuracy
+- Binary model persistence — Float64Array weights saved as raw buffer, metadata as JSON
+- `generate.js` updated with BIO-format prompt templates for LLM-based sequence data generation
+- `validateExample()` extended to validate sequence-labeling examples (tokens/tags arrays, valid BIO tags)
+- NER template added: PER, ORG, LOC entity types
+- Three new TUI screens: "Train CRF", "Predict CRF (tag text)", "Evaluate CRF (entity F1)"
+- Experiment recording with `algorithm: "crf"` and `feature_mode: "crf"`
+- Task menu expanded to 40 items (indices 0-39)
+
+### Tests
+
+- New `test/phase14.test.js` — wordShape (2), extractFeatures (5), fnv1a (2), featureHash (1), labelsToBIO (1), validateBIO (3), extractEntities (4), viterbi (3), trainCRF (3), predictSequence (2), evaluateEntities (3), model persistence (4), generate.js integration (7), NER template (2), exports (1)
+- 337 tests passing across 18 files
+
+## 0.1.9
+
+### Streaming generation (Phase 13)
+
+- Stream tokens from all three LLM providers as they arrive — see generation output in real-time
+- Anthropic SSE streaming — parse `content_block_delta` events for Claude responses
+- OpenAI SSE streaming — parse `choices[0].delta.content` from streaming completions
+- Ollama NDJSON streaming — parse newline-delimited JSON from local Ollama models
+- `streamProvider()` — unified streaming interface with `onToken(token, fullText)` callback, retry logic, and error handling matching `callProvider()`
+- SSE and NDJSON parsers handle chunked delivery, partial lines, and `[DONE]` sentinel
+- `streamBox()` TUI component — renders streaming tokens with automatic line wrapping
+- `generate()` and `preview()` accept `stream: true` + `onToken` callback
+- Per-batch stream labels — shows "Batch 2/5" header when streaming multi-batch generation
+- Two new menu items: "Preview (streaming)" and "Generate (streaming)"
+- Task menu expanded to 37 items (indices 0-36)
+
+### Tests
+
+- New `test/phase13.test.js` — SSE parsing (5), NDJSON parsing (3), token extractors (8), streamProvider with mock servers (6), streamBox (3), generate streaming (2), export consistency (3)
+- 294 tests passing across 17 files
+
 ## 0.1.8
 
 ### Transformer distillation (Phase 12)

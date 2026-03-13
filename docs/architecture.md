@@ -28,13 +28,14 @@ index.js
   ├── lib/ensemble.js    Ensemble inference + confidence threshold (process I/O)
   ├── lib/experiment.js  Experiment tracking via SQLite (file I/O)
   ├── lib/transformer.js Transformer fine-tuning orchestration (process I/O)
+  ├── lib/crf.js         Pure JS CRF for sequence labeling (pure logic + file I/O)
   ├── lib/templates.js   Pre-built task template loading (file I/O)
   ├── lib/report.js      HTML evaluation report generation (file I/O)
   ├── lib/config.js      Config file loading + defaults (file I/O)
   └── lib/log.js         Structured JSONL logging (file I/O)
 ```
 
-`lib/generate.js` imports from `lib/provider.js` for multi-provider support. `lib/embed-cache.js` imports from `lib/embed.js` for cached embedding. `lib/data.js` imports from `lib/embed.js` for semantic deduplication. `lib/curriculum.js` imports from `lib/infer.js` (difficulty scoring), `lib/provider.js` (LLM-as-judge, contrastive), and `lib/generate.js` (ensemble). `lib/multitask.js` imports from `lib/provider.js` (zero-shot eval) and `lib/generate.js` (progressive distillation). `lib/evaluate.js` is mostly self-contained — k-fold CV shells out to Python, feature importance runs an inline Python script, and the pure-JS functions (error taxonomy, calibration, PCA projection) have no imports. `lib/transformer.js` orchestrates `scripts/train_transformer.py` via subprocess — handles dependency detection, device discovery, model presets, and structured output parsing. All modules export functions consumed by `index.js`, which acts as the composition root.
+`lib/generate.js` imports from `lib/provider.js` for multi-provider support. `lib/embed-cache.js` imports from `lib/embed.js` for cached embedding. `lib/data.js` imports from `lib/embed.js` for semantic deduplication. `lib/curriculum.js` imports from `lib/infer.js` (difficulty scoring), `lib/provider.js` (LLM-as-judge, contrastive), and `lib/generate.js` (ensemble). `lib/multitask.js` imports from `lib/provider.js` (zero-shot eval) and `lib/generate.js` (progressive distillation). `lib/evaluate.js` is mostly self-contained — k-fold CV shells out to Python, feature importance runs an inline Python script, and the pure-JS functions (error taxonomy, calibration, PCA projection) have no imports. `lib/transformer.js` orchestrates `scripts/train_transformer.py` via subprocess — handles dependency detection, device discovery, model presets, and structured output parsing. `lib/crf.js` is entirely self-contained — feature extraction, hashing, Viterbi decoding, training, evaluation, and model persistence all in pure JavaScript with no external dependencies. All modules export functions consumed by `index.js`, which acts as the composition root.
 
 ## Data flow
 
@@ -93,6 +94,7 @@ Renders everything using ANSI escape codes written directly to `process.stdout`.
 - `progress(current, total, label)` — overwriting progress bar
 - `spinner(label)` — animated spinner with `.stop()` and `.fail()`
 - `table(rows, headers)` — bordered ASCII table
+- `streamBox(label)` — streaming token display with line wrapping, `.write(token)`, `.end(summary)`, `.chars()`
 - `banner()`, `header()`, `success()`, `warn()`, `error()`, `info()`, `dim()` — styled output
 
 The TUI uses raw mode for menus (to capture arrow keys) and cooked mode for text prompts.
@@ -107,13 +109,17 @@ Exports: `loadTask(name)`, `listTasks()`, `saveTask(task)`, `validate(data, sche
 
 Multi-provider LLM abstraction supporting Anthropic (Claude), OpenAI, and Ollama. Each provider has its own fetch implementation matching the provider's API format. The unified `callProvider()` function handles retries with exponential backoff and jitter on retryable errors (429, 529, 5xx). `resolveProvider()` merges task config, project config, and environment variables to select the right provider, model, and API key. `listProviders()` enumerates all providers and whether they're configured (have the required API key in env).
 
-Exports: `callProvider(providerName, opts)`, `resolveProvider(task, config)`, `listProviders()`, `PROVIDERS`, `backoffMs(attempt, base, max)`.
+Also provides `streamProvider()` — the streaming counterpart to `callProvider()`. Streams tokens via `onToken(token, fullTextSoFar)` callback. Uses SSE parsing for Anthropic/OpenAI and NDJSON parsing for Ollama. Same retry logic and error handling as batch mode. Parser functions (`parseSSE`, `parseNDJSON`) and token extractors (`extractAnthropicToken`, `extractOpenAIToken`, `extractOllamaToken`) are exported for testing and reuse.
+
+Exports: `callProvider(providerName, opts)`, `streamProvider(providerName, opts)`, `resolveProvider(task, config)`, `listProviders()`, `PROVIDERS`, `backoffMs(attempt, base, max)`, `parseSSE(reader)`, `parseNDJSON(reader)`, `extractAnthropicToken(data)`, `extractOpenAIToken(data)`, `extractOllamaToken(data)`.
 
 ## lib/generate.js
 
 Generates synthetic training data via LLM API calls. Uses `lib/provider.js` for multi-provider support — routes to the correct provider based on task config. Builds task-appropriate system and user prompts, sends sequential batch requests, parses JSON arrays from responses, validates each example against the task definition, drops malformed rows, and writes accumulated results to JSONL.
 
-Exports: `generate(task, { apiKey, onProgress, onRetry, onDropped, provider })`, `preview(task, { apiKey, count, onRetry, provider })`, `buildSystemPrompt(task)`, `buildBatchPrompt(task, batchSize)`, `parseBatchResponse(text)`, `validateExample(example, task)`, `backoffMs(attempt, base, max)`.
+Both `generate()` and `preview()` accept `stream: true` and `onToken` callback — when enabled, they use `streamProvider()` instead of `callProvider()`, yielding tokens as they arrive. The `onToken` callback in `generate()` also receives batch info `{ batch, batches }` for multi-batch progress display.
+
+Exports: `generate(task, { apiKey, onProgress, onRetry, onDropped, onToken, stream, provider })`, `preview(task, { apiKey, count, onRetry, onToken, stream, provider })`, `buildSystemPrompt(task)`, `buildBatchPrompt(task, batchSize)`, `parseBatchResponse(text)`, `validateExample(example, task)`, `backoffMs(attempt, base, max)`.
 
 ## lib/data.js
 
@@ -210,6 +216,16 @@ Exports: `listTemplates()`, `loadTemplate(name)`, `TEMPLATES_DIR`.
 Generates standalone HTML evaluation reports with inline CSS. Includes a confusion matrix (color-coded by cell value), per-label precision/recall/F1/support table, label distribution bar chart, and grouped example errors. Reports are written to `reports/<task-name>_report.html`.
 
 Exports: `generateReport(taskName, { valData, predictions, labels, meta })`, `confusionMatrix(actual, predicted, labels)`, `perLabelMetrics(actual, predicted, labels)`, `findErrors(data, predictions, { maxPerLabel })`.
+
+## lib/crf.js
+
+Pure JavaScript CRF (Conditional Random Field) for sequence labeling tasks like NER, POS tagging, and slot filling. Implements an averaged structured perceptron — for each training sequence, decodes with Viterbi, then updates weights toward gold features and away from predicted features. Weights are averaged across all updates for better generalization.
+
+Feature extraction produces rich token-level features: word identity, word shape (collapsing runs of uppercase/lowercase/digit), prefix/suffix (2 and 3 chars), capitalization, digit presence, hyphen, previous/next word, bigrams, and previous tag. Features are hashed via FNV-1a to a fixed-size index (default 2^18) to avoid a growing dictionary.
+
+`viterbi()` decodes the optimal tag sequence in O(n × T²) where n is sequence length and T is tag count. `extractEntities()` converts BIO tag sequences into entity spans with type, start, end, and text. `evaluateEntities()` computes entity-level precision/recall/F1 per type with micro averaging, plus token-level accuracy. Models are persisted as raw Float64Array binary (weights) plus JSON metadata (tags, hashSize).
+
+Exports: `extractFeatures(tokens, i, prevTag)`, `featureHash(feat, tag, hashSize)`, `fnv1a(str)`, `wordShape(w)`, `viterbi(tokens, tags, weights, hashSize)`, `score(features, tag, weights, hashSize)`, `trainCRF(data, opts)`, `predictSequence(tokens, model)`, `predictBatch(sequences, model)`, `extractEntities(tokens, tags)`, `evaluateEntities(goldData, predictions)`, `saveModel(taskName, model)`, `loadModel(taskName)`, `hasCRFModel(taskName)`, `labelsToBIO(labels)`, `validateBIO(tags)`.
 
 ## scripts/train.py
 

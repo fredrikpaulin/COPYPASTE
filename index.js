@@ -1,6 +1,6 @@
 import {
   clear, banner, header, success, warn, error, info, dim,
-  progress, spinner, prompt, menu, table, SHOW_CURSOR
+  progress, spinner, prompt, menu, table, streamBox, SHOW_CURSOR
 } from './lib/tui.js'
 import { loadTask, listTasks, saveTask } from './lib/task.js'
 import { generate, preview } from './lib/generate.js'
@@ -20,8 +20,10 @@ import { kFoldCV, featureImportance, errorTaxonomy, calibrationBins, projectTo2D
 import { trainEnsembleModels, listEnsembleModels, ensemblePredict, predictWithThreshold } from './lib/ensemble.js'
 import { recordExperiment, listExperiments, compareExperiments, bestExperiment, experimentStats, hashDataset } from './lib/experiment.js'
 import { checkDeps, detectDevice, listModelPresets, trainTransformer, predictTransformer, hasTransformerModel } from './lib/transformer.js'
+import { trainCRF, predictSequence, predictBatch, evaluateEntities, extractEntities, saveModel as saveCRFModel, loadModel as loadCRFModel, hasCRFModel, labelsToBIO, validateBIO } from './lib/crf.js'
 import { loadConfig } from './lib/config.js'
 import { startLog, logEntry, flushLog } from './lib/log.js'
+import { join } from 'node:path'
 
 const API_KEY = process.env.ANTHROPIC_API_KEY
 
@@ -127,22 +129,33 @@ async function runReport(task) {
   info(`Open in browser: file://${result.path}`)
 }
 
-async function runPreview(task) {
+async function runPreview(task, useStream = false) {
   if (!API_KEY) { error('Set ANTHROPIC_API_KEY in your environment'); return }
   if (!task.synthetic) { warn('No synthetic config on this task'); return }
 
   header(`Preview for "${task.name}"`)
-  const sp = spinner('Generating sample...')
+  if (useStream) info('Streaming: enabled')
+
+  let box = null
+  const sp = useStream ? null : spinner('Generating sample...')
 
   try {
     const result = await preview(task, {
       apiKey: API_KEY,
       count: 5,
+      stream: useStream,
+      onToken: useStream ? (token) => {
+        if (!box) box = streamBox('Streaming preview')
+        box.write(token)
+      } : undefined,
       onRetry: ({ attempt, waitMs }) => {
-        sp.stop(`Retry ${attempt} in ${Math.round(waitMs / 1000)}s...`)
+        if (box) { box.end(); box = null }
+        if (sp) sp.stop(`Retry ${attempt} in ${Math.round(waitMs / 1000)}s...`)
+        else warn(`Retry ${attempt} in ${Math.round(waitMs / 1000)}s...`)
       }
     })
-    sp.stop(`${result.examples.length} examples generated`)
+    if (box) { box.end(); box = null }
+    if (sp) sp.stop(`${result.examples.length} examples generated`)
 
     for (const ex of result.examples) {
       info(JSON.stringify(ex))
@@ -151,27 +164,39 @@ async function runPreview(task) {
       warn(`${result.dropped} malformed examples dropped`)
     }
   } catch (e) {
-    sp.fail('Preview failed')
+    if (box) { box.end(); box = null }
+    if (sp) sp.fail('Preview failed')
     error(e.message)
   }
 }
 
-async function runGenerate(task) {
+async function runGenerate(task, useStream = false) {
   if (!API_KEY) { error('Set ANTHROPIC_API_KEY in your environment'); return }
   if (!task.synthetic) { warn('No synthetic config on this task'); return }
 
   await startLog(task.name)
-  logEntry('generate_start', { task: task.name, count: task.synthetic.count })
+  logEntry('generate_start', { task: task.name, count: task.synthetic.count, stream: useStream })
 
   header(`Generating synthetic data for "${task.name}"`)
   info(`Model: ${task.synthetic.model || 'claude-sonnet-4-20250514'}`)
   info(`Target: ${task.synthetic.count} examples in batches of ${task.synthetic.batchSize}`)
+  if (useStream) info('Streaming: enabled — tokens will appear as they arrive')
 
+  let box = null
   try {
     const result = await generate(task, {
       apiKey: API_KEY,
-      onProgress: (current, total) => progress(current, total, 'examples'),
+      stream: useStream,
+      onToken: useStream ? (token, full, { batch, batches }) => {
+        if (!box) box = streamBox(`Batch ${batch}/${batches}`)
+        box.write(token)
+      } : undefined,
+      onProgress: (current, total) => {
+        if (box) { box.end(); box = null }
+        progress(current, total, 'examples')
+      },
       onRetry: ({ attempt, waitMs, status }) => {
+        if (box) { box.end(); box = null }
         warn(`Rate limited (${status}), retry ${attempt} in ${Math.round(waitMs / 1000)}s...`)
         logEntry('retry', { attempt, waitMs, status })
       },
@@ -180,10 +205,12 @@ async function runGenerate(task) {
         logEntry('dropped', { count })
       }
     })
+    if (box) { box.end(); box = null }
     success(`Generated ${result.count} examples → ${result.path}`)
     if (result.dropped) dim(`  (${result.dropped} dropped)`)
     logEntry('generate_complete', { count: result.count, dropped: result.dropped })
   } catch (e) {
+    if (box) { box.end(); box = null }
     error(`Generation failed: ${e.message}`)
     logEntry('generate_error', { error: e.message })
   }
@@ -1264,83 +1291,267 @@ async function runTransformerCompare(task) {
   )
 }
 
+// ── CRF Sequence Labeling ────────────────────────────────
+
+async function runCRFTrain(task) {
+  if (task.type !== 'sequence-labeling') {
+    warn('CRF training requires a sequence-labeling task'); return
+  }
+
+  header(`Train CRF for "${task.name}"`)
+  const tags = labelsToBIO(task.labels)
+  info(`Entity types: ${task.labels.join(', ')}`)
+  info(`BIO tags: ${tags.join(', ')}`)
+
+  // Load data
+  const { readJsonl } = await import('./lib/data.js')
+  const dataPath = join('data', `${task.name}_synthetic.jsonl`)
+  const file = Bun.file(dataPath)
+  if (!await file.exists()) { warn('No data found. Generate data first.'); return }
+
+  const data = await readJsonl(dataPath)
+  const seqData = data.filter(d => Array.isArray(d.tokens) && Array.isArray(d.tags))
+  if (seqData.length < 2) { warn(`Only ${seqData.length} valid sequences found. Need at least 2.`); return }
+
+  // Split
+  const splitIdx = Math.floor(seqData.length * 0.8)
+  const trainData = seqData.slice(0, splitIdx)
+  const valData = seqData.slice(splitIdx)
+  info(`Train: ${trainData.length} sequences, Val: ${valData.length} sequences`)
+
+  // Train
+  const epochsStr = await prompt('Epochs [10]:')
+  const epochs = parseInt(epochsStr) || 10
+
+  const startTime = Date.now()
+  const model = trainCRF(trainData, {
+    tags,
+    epochs,
+    onEpoch: ({ epoch, epochs, accuracy, sequencesCorrect, sequencesTotal }) => {
+      progress(epoch, epochs, `epoch — ${sequencesCorrect}/${sequencesTotal} sequences correct (${(accuracy * 100).toFixed(1)}%)`)
+    }
+  })
+
+  const duration = Date.now() - startTime
+  success(`Training complete in ${(duration / 1000).toFixed(1)}s`)
+
+  // Evaluate
+  const predictions = predictBatch(valData.map(d => d.tokens), model)
+  const eval_ = evaluateEntities(valData, predictions)
+
+  info(`Token accuracy: ${(eval_.tokenAccuracy * 100).toFixed(1)}%`)
+  info(`Entity F1 (micro): ${(eval_.micro.f1 * 100).toFixed(1)}%`)
+  info(`Entities — gold: ${eval_.totalEntities.gold}, predicted: ${eval_.totalEntities.predicted}`)
+
+  if (Object.keys(eval_.byType).length > 0) {
+    table(
+      Object.entries(eval_.byType).map(([type, m]) => [
+        type,
+        (m.precision * 100).toFixed(1) + '%',
+        (m.recall * 100).toFixed(1) + '%',
+        (m.f1 * 100).toFixed(1) + '%',
+        m.support
+      ]),
+      ['Entity', 'Precision', 'Recall', 'F1', 'Support']
+    )
+  }
+
+  // Save
+  const modelDir = await saveCRFModel(task.name, model)
+  success(`Model saved to ${modelDir}`)
+
+  // Record experiment
+  try {
+    recordExperiment({
+      task: task.name,
+      algorithm: 'crf',
+      accuracy: eval_.micro.f1,
+      train_size: trainData.length,
+      val_size: valData.length,
+      feature_mode: 'crf',
+      hyperparams: { epochs, hashSize: model.hashSize },
+      duration_ms: duration,
+      labels: task.labels
+    })
+    dim('  Experiment recorded')
+  } catch {}
+}
+
+async function runCRFPredict(task) {
+  if (task.type !== 'sequence-labeling') {
+    warn('CRF prediction requires a sequence-labeling task'); return
+  }
+
+  const model = await loadCRFModel(task.name)
+  if (!model) { warn('No CRF model found. Train one first.'); return }
+
+  header(`CRF Predict — "${task.name}"`)
+  info('Enter text to tag (or "q" to quit):')
+
+  while (true) {
+    const text = await prompt('Text:')
+    if (text === 'q' || text === 'quit') break
+
+    const tokens = text.split(/\s+/)
+    const tags = predictSequence(tokens, model)
+    const entities = extractEntities(tokens, tags)
+
+    // Show tagged output
+    const tagged = tokens.map((t, i) => {
+      if (tags[i] === 'O') return t
+      return `[${t}/${tags[i]}]`
+    }).join(' ')
+    info(tagged)
+
+    if (entities.length > 0) {
+      for (const e of entities) {
+        dim(`  ${e.type}: "${e.text}"`)
+      }
+    } else {
+      dim('  (no entities found)')
+    }
+  }
+}
+
+async function runCRFEval(task) {
+  if (task.type !== 'sequence-labeling') {
+    warn('CRF evaluation requires a sequence-labeling task'); return
+  }
+
+  const model = await loadCRFModel(task.name)
+  if (!model) { warn('No CRF model found. Train one first.'); return }
+
+  header(`CRF Evaluation — "${task.name}"`)
+
+  const { readJsonl } = await import('./lib/data.js')
+  const dataPath = join('data', `${task.name}_synthetic.jsonl`)
+  const file = Bun.file(dataPath)
+  if (!await file.exists()) { warn('No data found.'); return }
+
+  const data = await readJsonl(dataPath)
+  const seqData = data.filter(d => Array.isArray(d.tokens) && Array.isArray(d.tags))
+  const valData = seqData.slice(Math.floor(seqData.length * 0.8))
+
+  if (valData.length === 0) { warn('No validation data.'); return }
+
+  const predictions = predictBatch(valData.map(d => d.tokens), model)
+  const eval_ = evaluateEntities(valData, predictions)
+
+  info(`Sequences: ${valData.length}`)
+  info(`Token accuracy: ${(eval_.tokenAccuracy * 100).toFixed(1)}%`)
+  info(`Entity F1 (micro): P=${(eval_.micro.precision * 100).toFixed(1)}% R=${(eval_.micro.recall * 100).toFixed(1)}% F1=${(eval_.micro.f1 * 100).toFixed(1)}%`)
+
+  if (Object.keys(eval_.byType).length > 0) {
+    table(
+      Object.entries(eval_.byType).map(([type, m]) => [
+        type,
+        (m.precision * 100).toFixed(1) + '%',
+        (m.recall * 100).toFixed(1) + '%',
+        (m.f1 * 100).toFixed(1) + '%',
+        m.support
+      ]),
+      ['Entity', 'Precision', 'Recall', 'F1', 'Support']
+    )
+  }
+
+  // Show sample predictions
+  info('Sample predictions:')
+  for (let i = 0; i < Math.min(3, valData.length); i++) {
+    const gold = valData[i]
+    const pred = predictions[i]
+    dim(`  Gold: ${gold.tokens.map((t, j) => gold.tags[j] !== 'O' ? `[${t}/${gold.tags[j]}]` : t).join(' ')}`)
+    dim(`  Pred: ${pred.tokens.map((t, j) => pred.tags[j] !== 'O' ? `[${t}/${pred.tags[j]}]` : t).join(' ')}`)
+    dim('')
+  }
+}
+
 async function taskMenu(task) {
   while (true) {
     const action = await menu(`Task: ${task.name}`, [
       'Run full pipeline',                          // 0
       'Preview (sample generation)',                 // 1
-      'Generate synthetic data',                     // 2
-      'Prepare data (dedupe + merge + split)',        // 3
-      'Semantic dedup (embedding-based)',             // 4
-      'Augment data',                                // 5
-      'Confidence filter',                           // 6
-      'LLM-as-judge quality scoring',                // 7
-      'Contrastive example generation',              // 8
-      'Cross-provider ensemble generation',          // 9
-      'Curriculum analysis',                         // 10
-      'Train model (TF-IDF)',                        // 11
-      'Train model (embeddings)',                    // 12
-      'Train ensemble (all algorithms)',             // 13
-      'Compare algorithms',                          // 14
-      'Hyperparameter search',                       // 15
-      'K-fold cross-validation',                     // 16
-      'Predict (interactive)',                       // 17
-      'Predict (confidence threshold)',              // 18
-      'Predict (ensemble)',                          // 19
-      'Zero-shot eval (LLM baseline)',               // 20
-      'Uncertainty sampling (active learning)',       // 21
-      'Active learning history',                     // 22
-      'Evaluation report',                           // 23
-      'Feature importance',                          // 24
-      'Error taxonomy',                              // 25
-      'Calibration analysis',                        // 26
-      'Experiment history',                          // 27
-      'Model versions',                              // 28
-      'Bundle for deployment',                       // 29
-      'Embedding cache stats',                       // 30
-      'Train transformer (fine-tune)',                 // 31
-      'Predict (transformer)',                         // 32
-      'Compare all models (experiment history)',        // 33
-      '← Back'                                         // 34
+      'Preview (streaming)',                         // 2
+      'Generate synthetic data',                     // 3
+      'Generate (streaming)',                        // 4
+      'Prepare data (dedupe + merge + split)',        // 5
+      'Semantic dedup (embedding-based)',             // 6
+      'Augment data',                                // 7
+      'Confidence filter',                           // 8
+      'LLM-as-judge quality scoring',                // 9
+      'Contrastive example generation',              // 10
+      'Cross-provider ensemble generation',          // 11
+      'Curriculum analysis',                         // 12
+      'Train model (TF-IDF)',                        // 13
+      'Train model (embeddings)',                    // 14
+      'Train ensemble (all algorithms)',             // 15
+      'Compare algorithms',                          // 16
+      'Hyperparameter search',                       // 17
+      'K-fold cross-validation',                     // 18
+      'Predict (interactive)',                       // 19
+      'Predict (confidence threshold)',              // 20
+      'Predict (ensemble)',                          // 21
+      'Zero-shot eval (LLM baseline)',               // 22
+      'Uncertainty sampling (active learning)',       // 23
+      'Active learning history',                     // 24
+      'Evaluation report',                           // 25
+      'Feature importance',                          // 26
+      'Error taxonomy',                              // 27
+      'Calibration analysis',                        // 28
+      'Experiment history',                          // 29
+      'Model versions',                              // 30
+      'Bundle for deployment',                       // 31
+      'Embedding cache stats',                       // 32
+      'Train transformer (fine-tune)',                 // 33
+      'Predict (transformer)',                         // 34
+      'Compare all models (experiment history)',        // 35
+      'Train CRF (sequence labeling)',                  // 36
+      'Predict CRF (tag text)',                         // 37
+      'Evaluate CRF (entity F1)',                       // 38
+      '← Back'                                         // 39
     ])
 
     if (action === 0) await runFullPipeline(task)
     else if (action === 1) await runPreview(task)
-    else if (action === 2) await runGenerate(task)
-    else if (action === 3) await runPrepare(task)
-    else if (action === 4) await runSemanticDedup(task)
-    else if (action === 5) await runAugment(task)
-    else if (action === 6) await runConfidenceFilter(task)
-    else if (action === 7) await runLLMJudge(task)
-    else if (action === 8) await runContrastive(task)
-    else if (action === 9) await runEnsembleGenerate(task)
-    else if (action === 10) await runCurriculumAnalysis(task)
-    else if (action === 11) {
+    else if (action === 2) await runPreview(task, true)
+    else if (action === 3) await runGenerate(task)
+    else if (action === 4) await runGenerate(task, true)
+    else if (action === 5) await runPrepare(task)
+    else if (action === 6) await runSemanticDedup(task)
+    else if (action === 7) await runAugment(task)
+    else if (action === 8) await runConfidenceFilter(task)
+    else if (action === 9) await runLLMJudge(task)
+    else if (action === 10) await runContrastive(task)
+    else if (action === 11) await runEnsembleGenerate(task)
+    else if (action === 12) await runCurriculumAnalysis(task)
+    else if (action === 13) {
       const splitResult = await runPrepare(task)
       if (splitResult) await runTrain(task, splitResult)
     }
-    else if (action === 12) await runEmbedTrain(task)
-    else if (action === 13) await runTrainEnsemble(task)
-    else if (action === 14) await runCompare(task)
-    else if (action === 15) await runHyperparamSearch(task)
-    else if (action === 16) await runKFoldCV(task)
-    else if (action === 17) await runPredict(task)
-    else if (action === 18) await runThresholdPredict(task)
-    else if (action === 19) await runEnsemblePredict(task)
-    else if (action === 20) await runZeroShot(task)
-    else if (action === 21) await runUncertaintySampling(task)
-    else if (action === 22) await runActiveLearningHistory(task)
-    else if (action === 23) await runReport(task)
-    else if (action === 24) await runFeatureImportance(task)
-    else if (action === 25) await runErrorTaxonomy(task)
-    else if (action === 26) await runCalibration(task)
-    else if (action === 27) await runExperimentHistory(task)
-    else if (action === 28) await runModelVersions(task)
-    else if (action === 29) await runBundle(task)
-    else if (action === 30) await runEmbedCacheStats()
-    else if (action === 31) await runTransformerTrain(task)
-    else if (action === 32) await runTransformerPredict(task)
-    else if (action === 33) await runTransformerCompare(task)
+    else if (action === 14) await runEmbedTrain(task)
+    else if (action === 15) await runTrainEnsemble(task)
+    else if (action === 16) await runCompare(task)
+    else if (action === 17) await runHyperparamSearch(task)
+    else if (action === 18) await runKFoldCV(task)
+    else if (action === 19) await runPredict(task)
+    else if (action === 20) await runThresholdPredict(task)
+    else if (action === 21) await runEnsemblePredict(task)
+    else if (action === 22) await runZeroShot(task)
+    else if (action === 23) await runUncertaintySampling(task)
+    else if (action === 24) await runActiveLearningHistory(task)
+    else if (action === 25) await runReport(task)
+    else if (action === 26) await runFeatureImportance(task)
+    else if (action === 27) await runErrorTaxonomy(task)
+    else if (action === 28) await runCalibration(task)
+    else if (action === 29) await runExperimentHistory(task)
+    else if (action === 30) await runModelVersions(task)
+    else if (action === 31) await runBundle(task)
+    else if (action === 32) await runEmbedCacheStats()
+    else if (action === 33) await runTransformerTrain(task)
+    else if (action === 34) await runTransformerPredict(task)
+    else if (action === 35) await runTransformerCompare(task)
+    else if (action === 36) await runCRFTrain(task)
+    else if (action === 37) await runCRFPredict(task)
+    else if (action === 38) await runCRFEval(task)
     else return
   }
 }

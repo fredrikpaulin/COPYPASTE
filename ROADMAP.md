@@ -1,6 +1,6 @@
 # Roadmap
 
-Current status: **v0.1.8 — phases 1–12 complete.** All planned phases are implemented: foundation, production hardening, data quality, model capabilities, deployment, active learning, multi-provider extensibility, embedding-based models, curriculum learning, transfer learning, interpretability, ensemble inference, experiment tracking, and transformer distillation.
+Current status: **v0.1.10 — phases 1–14 complete.** All planned phases are implemented: foundation, production hardening, data quality, model capabilities, deployment, active learning, multi-provider extensibility, embedding-based models, curriculum learning, transfer learning, interpretability, ensemble inference, experiment tracking, transformer distillation, streaming generation, and CRF sequence labeling.
 
 ---
 
@@ -223,3 +223,42 @@ HuggingFace Trainer with per-epoch evaluation, structured JSON output for TUI pr
 
 ### Prediction
 Load fine-tuned transformer models for inference with softmax confidence scores. Same interface as classical prediction for consistency.
+
+---
+
+## Phase 13 — Streaming generation ✅
+
+Stream LLM responses token-by-token for better UX during data generation.
+
+### Provider-specific stream parsing
+SSE (Server-Sent Events) parsing for Anthropic and OpenAI, NDJSON (newline-delimited JSON) for Ollama. Handles chunked delivery, partial lines across network boundaries, and provider-specific event formats.
+
+### Unified streaming interface
+`streamProvider()` mirrors `callProvider()` but yields tokens via `onToken(token, fullTextSoFar)` callback. Same retry logic (429/529/5xx with exponential backoff), same error handling, same provider resolution.
+
+### TUI stream display
+`streamBox()` component renders tokens as they arrive with automatic line wrapping, character counting, and per-batch headers. The existing progress bar still shows after each batch completes.
+
+### Backward compatible
+Streaming is opt-in via `stream: true` — existing batch-mode code paths are unchanged. Both `generate()` and `preview()` accept the new option.
+
+---
+
+## Phase 14 — CRF sequence labeling ✅
+
+Pure JavaScript Conditional Random Field for NER, POS tagging, and slot filling — a new task type beyond classification.
+
+### CRF engine
+Averaged structured perceptron with Viterbi decoding, implemented entirely in JavaScript with no dependencies. Feature hashing via FNV-1a maps rich feature templates (word identity, shape, prefix/suffix, capitalization, context windows, previous tag) to a fixed-size weight vector.
+
+### BIO tagging
+Standard BIO scheme — B-TYPE marks entity start, I-TYPE marks continuation, O marks outside. `labelsToBIO()` converts user-defined entity types to the full tag set. `validateBIO()` checks well-formedness (no orphan I- tags).
+
+### Entity-level evaluation
+Goes beyond token accuracy to compute entity-level precision/recall/F1 per entity type, with micro-averaged scores. Exact span matching — partial overlaps don't count. Sample predictions shown in the evaluation view.
+
+### Data generation
+BIO-format prompt templates for LLM-based synthetic data generation. `validateExample()` enforces tokens/tags array matching and valid BIO tags. NER template (PER/ORG/LOC) included.
+
+### Model persistence
+Weights stored as raw Float64Array binary for fast load, metadata as JSON. Same save/load pattern as other model types.
