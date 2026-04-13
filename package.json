@@ -1,6 +1,6 @@
 {
   "name": "copypaste",
-  "version": "0.1.13",
+  "version": "0.2.0",
   "description": "Train small, task-specific models from LLM-generated data. Define a task, generate synthetic examples via Claude, and train a scikit-learn model — all from an interactive TUI.",
   "module": "index.js",
   "type": "module",
@@ -31,6 +31,7 @@
     "training-pipeline"
   ],
   "scripts": {
+    "setup": "bash setup.sh",
     "start": "bun index.js",
     "test": "bun test"
   },

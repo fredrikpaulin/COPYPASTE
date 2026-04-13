@@ -36,6 +36,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # IntelliJ based IDEs
 .idea
 
+# Python venv
+.venv
+
 # Finder (MacOS) folder config
 .DS_Store
 PR/

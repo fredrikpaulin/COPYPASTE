@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.2.0 — 2026-04-13
+
+### Bun native migration
+
+- Converted all Python subprocess calls from Node.js `child_process` compat to native `Bun.spawn` across `train.js`, `infer.js`, `active.js`, `transformer.js`, `ensemble.js`, `evaluate.js`
+- Use `FileSink` stdin API (`proc.stdin.write()` + `proc.stdin.end()`) instead of `WritableStream.getWriter()`
+- Use `new Response(proc.stdout).text()` for one-shot reads, `for await` loops for streaming callbacks
+- Fixed empty stderr stream hang in Bun 1.3.3 — switched to `stderr: 'ignore'` for all utility-style subprocess calls
+
+### Bug fixes
+
+- `lib/data.js` — `filterByConfidence` now uses `callProvider()` instead of hardcoded Anthropic `fetch()`; accepts `provider` parameter
+- `lib/data.js` — `augment` fallback: when both random gates miss (24% chance), synonym replacement fires so augmented rows are never silently dropped
+- `lib/active.js` — `llmLabel` now uses `callProvider()` instead of hardcoded Anthropic `fetch()`
+- `lib/generate.js` — removed dead `callClaude`, `backoffMs_local`, `sleep` functions (~40 lines); `generate()` and `preview()` always route through `callProvider()`
+- `lib/tui.js` — removed dead `selected = -1` assignment
+- `lib/multitask.js` — removed unused `node:child_process` dynamic import
+
+### Performance
+
+- `lib/crf.js` — Viterbi: cached feature extraction per (position, prevTag) instead of recomputing for every (position x prevTag x currentTag) triple
+- `lib/active-loop.js` — `crfMargin` consolidated from 2 Viterbi passes to 1 with same feature caching
+- `lib/evaluate.js` — fixed `calibrationBins` O(n²) `bins.indexOf(bin)` with direct index loop
+- `lib/experiment.js` — changed per-call open/close SQLite to lazy singleton pattern; added `closeDb()` export
+
+### Added
+
+- `setup.sh` — installs Python venv with scikit-learn, numpy, torch, transformers, ONNX deps
+- `package.json` — added `"setup": "bash setup.sh"` script
+- `.gitignore` — added `.venv`
+
 ## 0.1.13
 
 ### Few-shot prompt optimization (Phase 17)
